@@ -1,6 +1,6 @@
 [tasks.test]
 clear = true
-toolchain = "1.51"
+condition = { rust_version = { min = "1.51.0" } }
 command = "cargo"
 args = ["test"]
 

@@ -33,5 +33,4 @@ args = [
     "--",
     "--features",
     "wasm_bench",
-    "bench",
 ]

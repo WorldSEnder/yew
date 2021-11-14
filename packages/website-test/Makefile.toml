@@ -1,5 +1,6 @@
 [tasks.doc-test]
 command = "cargo"
+condition = { rust_version = { min = "1.56.1" } }
 args = [
 	"test"
 ]
