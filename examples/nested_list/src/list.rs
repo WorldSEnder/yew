@@ -1,8 +1,8 @@
 use crate::header::{ListHeader, Props as HeaderProps};
 use crate::item::{ListItem, Props as ItemProps};
-use crate::{Hovered, WeakComponentLink};
+use crate::Hovered;
 use std::rc::Rc;
-use yew::html::{ChildrenRenderer, NodeRef};
+use yew::html::ChildrenRenderer;
 use yew::prelude::*;
 use yew::virtual_dom::{VChild, VComp};
 
@@ -44,10 +44,8 @@ where
 impl From<ListVariant> for Html {
     fn from(variant: ListVariant) -> Html {
         match variant.props {
-            Variants::Header(props) => {
-                VComp::new::<ListHeader>(props, NodeRef::default(), None).into()
-            }
-            Variants::Item(props) => VComp::new::<ListItem>(props, NodeRef::default(), None).into(),
+            Variants::Header(props) => VComp::new::<ListHeader>(props, None, None).into(),
+            Variants::Item(props) => VComp::new::<ListItem>(props, None, None).into(),
         }
     }
 }
@@ -60,7 +58,6 @@ pub enum Msg {
 pub struct Props {
     pub children: ChildrenRenderer<ListVariant>,
     pub on_hover: Callback<Hovered>,
-    pub weak_link: WeakComponentLink<List>,
 }
 
 pub struct List {
@@ -71,11 +68,7 @@ impl Component for List {
     type Message = Msg;
     type Properties = Props;
 
-    fn create(ctx: &Context<Self>) -> Self {
-        ctx.props()
-            .weak_link
-            .borrow_mut()
-            .replace(ctx.link().clone());
+    fn create(_ctx: &Context<Self>) -> Self {
         Self { inactive: false }
     }
 

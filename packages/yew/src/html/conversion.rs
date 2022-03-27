@@ -1,5 +1,5 @@
-use super::{Component, NodeRef, Scope};
-use crate::virtual_dom::AttrValue;
+use super::{NodeRef, Scope};
+use crate::{virtual_dom::AttrValue, BaseComponent, ComponentRef};
 use std::rc::Rc;
 
 /// Marker trait for types that the [`html!`](macro@crate::html) macro may clone implicitly.
@@ -9,7 +9,8 @@ impl<T: ImplicitClone> ImplicitClone for Option<T> {}
 impl<T> ImplicitClone for Rc<T> {}
 
 impl ImplicitClone for NodeRef {}
-impl<Comp: Component> ImplicitClone for Scope<Comp> {}
+impl<Comp: BaseComponent> ImplicitClone for ComponentRef<Comp> {}
+impl<Comp: BaseComponent> ImplicitClone for Scope<Comp> {}
 // TODO there are still a few missing
 
 macro_rules! impl_implicit_clone {

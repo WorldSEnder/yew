@@ -391,7 +391,7 @@ mod feat_csr {
     use crate::html::component::lifecycle::{
         ComponentRenderState, CreateRunner, DestroyRunner, RenderRunner,
     };
-    use crate::html::NodeRef;
+    use crate::html::{ComponentAnyRef, NodeRef};
     use crate::scheduler;
     use std::cell::Ref;
     use web_sys::Element;
@@ -407,6 +407,7 @@ mod feat_csr {
             parent: Element,
             next_sibling: NodeRef,
             node_ref: NodeRef,
+            scope_ref: ComponentAnyRef,
             props: Rc<COMP::Properties>,
         ) {
             let bundle = Bundle::new();
@@ -417,6 +418,7 @@ mod feat_csr {
                 node_ref,
                 parent,
                 next_sibling,
+                scope_ref,
             };
 
             scheduler::push_component_create(
@@ -437,13 +439,13 @@ mod feat_csr {
         pub(crate) fn reuse(
             &self,
             props: Rc<COMP::Properties>,
-            node_ref: NodeRef,
+            scope_ref: ComponentAnyRef,
             next_sibling: NodeRef,
         ) {
             #[cfg(debug_assertions)]
             super::super::log_event(self.id, "reuse");
 
-            self.push_update(UpdateEvent::Properties(props, node_ref, next_sibling));
+            self.push_update(UpdateEvent::Properties(props, scope_ref, next_sibling));
         }
     }
 

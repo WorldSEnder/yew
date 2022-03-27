@@ -1,7 +1,7 @@
 use super::header::ListHeader;
 use super::item::ListItem;
 use super::list::List;
-use super::{Hovered, WeakComponentLink};
+use super::Hovered;
 use yew::prelude::*;
 
 pub enum Msg {
@@ -10,8 +10,8 @@ pub enum Msg {
 
 pub struct App {
     hovered: Hovered,
-    list_link: WeakComponentLink<List>,
-    sub_list_link: WeakComponentLink<List>,
+    list_link: ComponentRef<List>,
+    sub_list_link: ComponentRef<List>,
 }
 
 impl Component for App {
@@ -21,8 +21,8 @@ impl Component for App {
     fn create(_ctx: &Context<Self>) -> Self {
         Self {
             hovered: Hovered::None,
-            list_link: WeakComponentLink::default(),
-            sub_list_link: WeakComponentLink::default(),
+            list_link: ComponentRef::new(),
+            sub_list_link: ComponentRef::new(),
         }
     }
 
@@ -52,13 +52,13 @@ impl Component for App {
         html! {
             <div class="main" {onmouseover}>
                 <h1>{ "Nested List Demo" }</h1>
-                <List {on_hover} weak_link={list_link}>
+                <List {on_hover} ref={list_link}>
                     <ListHeader text="Calling all Rusties!" {on_hover} {list_link} />
                     <ListItem name="Rustin" {on_hover} />
                     <ListItem hide=true name="Rustaroo" {on_hover} />
                     <ListItem name="Rustifer" {on_hover}>
                         <div class="sublist" onmouseover={onmouseoversublist}>{ "Sublist!" }</div>
-                        <List {on_hover} weak_link={sub_list_link}>
+                        <List {on_hover} ref={sub_list_link}>
                             <ListHeader text="Sub Rusties!" {on_hover} list_link={sub_list_link}/>
                             <ListItem hide=true name="Hidden Sub" {on_hover} />
                             { for letters }

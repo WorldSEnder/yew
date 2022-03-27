@@ -1,7 +1,7 @@
 //! [AppHandle] contains the state Yew keeps to bootstrap a component in an isolated scope.
 
 use crate::dom_bundle::BSubtree;
-use crate::html::Scoped;
+use crate::html::{ComponentAnyRef, Scoped};
 use crate::html::{IntoComponent, NodeRef, Scope};
 use std::ops::Deref;
 use std::rc::Rc;
@@ -34,6 +34,7 @@ where
             host,
             NodeRef::default(),
             NodeRef::default(),
+            ComponentAnyRef::default(),
             props,
         );
 

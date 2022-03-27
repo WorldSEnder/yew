@@ -12,7 +12,7 @@ use std::rc::Rc;
 #[cfg(feature = "csr")]
 use crate::dom_bundle::{BSubtree, Bundle};
 #[cfg(feature = "csr")]
-use crate::html::NodeRef;
+use crate::html::{ComponentAnyRef, NodeRef};
 #[cfg(feature = "csr")]
 use web_sys::Element;
 
@@ -24,6 +24,7 @@ pub(crate) enum ComponentRenderState {
         parent: Element,
         next_sibling: NodeRef,
         node_ref: NodeRef,
+        scope_ref: ComponentAnyRef,
     },
 
     #[cfg(feature = "ssr")]
@@ -42,6 +43,7 @@ impl std::fmt::Debug for ComponentRenderState {
                 ref parent,
                 ref next_sibling,
                 ref node_ref,
+                ref scope_ref,
             } => f
                 .debug_struct("ComponentRenderState::Render")
                 .field("bundle", bundle)
@@ -49,6 +51,7 @@ impl std::fmt::Debug for ComponentRenderState {
                 .field("parent", parent)
                 .field("next_sibling", next_sibling)
                 .field("node_ref", node_ref)
+                .field("scope_ref", scope_ref)
                 .finish(),
 
             #[cfg(feature = "ssr")]
@@ -249,7 +252,7 @@ pub(crate) enum UpdateEvent {
     Message,
     /// Wraps properties, node ref, and next sibling for a component
     #[cfg(feature = "csr")]
-    Properties(Rc<dyn Any>, NodeRef, NodeRef),
+    Properties(Rc<dyn Any>, ComponentAnyRef, NodeRef),
 }
 
 pub(crate) struct UpdateRunner {
@@ -264,16 +267,16 @@ impl Runnable for UpdateRunner {
                 UpdateEvent::Message => state.inner.flush_messages(),
 
                 #[cfg(feature = "csr")]
-                UpdateEvent::Properties(props, next_node_ref, next_sibling) => {
+                UpdateEvent::Properties(props, next_scope_ref, next_sibling) => {
                     match state.render_state {
                         #[cfg(feature = "csr")]
                         ComponentRenderState::Render {
-                            ref mut node_ref,
+                            ref mut scope_ref,
                             next_sibling: ref mut current_next_sibling,
                             ..
                         } => {
                             // When components are updated, a new node ref could have been passed in
-                            *node_ref = next_node_ref;
+                            scope_ref.swap_into(next_scope_ref, || state.inner.any_scope());
                             // When components are updated, their siblings were likely also updated
                             *current_next_sibling = next_sibling;
                             // Only trigger changed if props were changed
@@ -333,11 +336,13 @@ impl Runnable for DestroyRunner {
                     ref parent,
                     ref root,
                     ref node_ref,
+                    ref scope_ref,
                     ..
                 } => {
                     bundle.detach(root, parent, self.parent_to_detach);
 
                     node_ref.set(None);
+                    scope_ref.set(None);
                 }
 
                 #[cfg(feature = "ssr")]
@@ -433,9 +438,11 @@ impl RenderRunner {
                 ref root,
                 ref next_sibling,
                 ref node_ref,
+                ref scope_ref,
                 ..
             } => {
                 let scope = state.inner.any_scope();
+                scope_ref.set(Some(scope.clone()));
                 let new_node_ref =
                     bundle.reconcile(root, &scope, parent, next_sibling.clone(), new_root);
                 node_ref.link(new_node_ref);
@@ -627,6 +634,7 @@ mod tests {
             parent,
             NodeRef::default(),
             NodeRef::default(),
+            ComponentAnyRef::default(),
             Rc::new(props),
         );
         crate::scheduler::start_now();
