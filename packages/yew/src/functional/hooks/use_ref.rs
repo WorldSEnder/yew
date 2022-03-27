@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::functional::{hook, use_memo, use_state};
-use crate::NodeRef;
+use crate::{Component, ComponentRef, NodeRef};
 
 /// This hook is used for obtaining a mutable reference to a stateful value.
 /// Its state persists across renders.
@@ -118,4 +118,11 @@ where
 #[hook]
 pub fn use_node_ref() -> NodeRef {
     (*use_state(NodeRef::default)).clone()
+}
+
+/// This hook is used for obtaining a [`ComponentRef`].
+/// The reference persists across renders, but a rerender is not triggered if the underlying ref changes.
+#[hook]
+pub fn use_component_ref<COMP: Component>() -> ComponentRef<COMP> {
+    (*use_state(ComponentRef::default)).clone()
 }
