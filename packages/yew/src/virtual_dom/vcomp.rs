@@ -281,7 +281,7 @@ mod ssr_tests {
             }
         }
 
-        let renderer = ServerRenderer::<Comp>::new();
+        let renderer = ServerRenderer::<Comp>::new().hydratable(false);
 
         let s = renderer.render().await;
 
