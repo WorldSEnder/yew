@@ -276,7 +276,7 @@ impl Runnable for UpdateRunner {
                             ..
                         } => {
                             // When components are updated, a new node ref could have been passed in
-                            scope_ref.swap_into(next_scope_ref, || state.inner.any_scope());
+                            scope_ref.morph_into(next_scope_ref, || state.inner.any_scope());
                             // When components are updated, their siblings were likely also updated
                             *current_next_sibling = next_sibling;
                             // Only trigger changed if props were changed

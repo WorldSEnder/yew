@@ -24,7 +24,7 @@ use futures::future::{FutureExt, LocalBoxFuture};
 pub struct VComp {
     pub(crate) type_id: TypeId,
     pub(crate) mountable: Box<dyn Mountable>,
-    pub(crate) scope_ref: ComponentAnyRef,
+    pub(crate) comp_ref: ComponentAnyRef,
     pub(crate) key: Option<Key>,
 }
 
@@ -32,7 +32,7 @@ impl fmt::Debug for VComp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VComp")
             .field("type_id", &self.type_id)
-            .field("scope_ref", &self.scope_ref)
+            .field("comp_ref", &self.comp_ref)
             .field("mountable", &"..")
             .field("key", &self.key)
             .finish()
@@ -44,7 +44,7 @@ impl Clone for VComp {
         Self {
             type_id: self.type_id,
             mountable: self.mountable.copy(),
-            scope_ref: self.scope_ref.clone(),
+            comp_ref: self.comp_ref.clone(),
             key: self.key.clone(),
         }
     }
@@ -58,19 +58,14 @@ pub(crate) trait Mountable {
         self: Box<Self>,
         root: &BSubtree,
         node_ref: NodeRef,
-        scope_ref: ComponentAnyRef,
+        comp_ref: ComponentAnyRef,
         parent_scope: &AnyScope,
         parent: Element,
         next_sibling: NodeRef,
     ) -> Box<dyn Scoped>;
 
     #[cfg(feature = "csr")]
-    fn reuse(
-        self: Box<Self>,
-        scope_ref: ComponentAnyRef,
-        scope: &dyn Scoped,
-        next_sibling: NodeRef,
-    );
+    fn reuse(self: Box<Self>, comp_ref: ComponentAnyRef, scope: &dyn Scoped, next_sibling: NodeRef);
 
     #[cfg(feature = "ssr")]
     fn render_to_string<'a>(
@@ -104,7 +99,7 @@ impl<COMP: BaseComponent> Mountable for PropsWrapper<COMP> {
         self: Box<Self>,
         root: &BSubtree,
         node_ref: NodeRef,
-        scope_ref: ComponentAnyRef,
+        comp_ref: ComponentAnyRef,
         parent_scope: &AnyScope,
         parent: Element,
         next_sibling: NodeRef,
@@ -115,7 +110,7 @@ impl<COMP: BaseComponent> Mountable for PropsWrapper<COMP> {
             parent,
             next_sibling,
             node_ref,
-            scope_ref,
+            comp_ref,
             self.props,
         );
 
@@ -125,12 +120,12 @@ impl<COMP: BaseComponent> Mountable for PropsWrapper<COMP> {
     #[cfg(feature = "csr")]
     fn reuse(
         self: Box<Self>,
-        scope_ref: ComponentAnyRef,
+        comp_ref: ComponentAnyRef,
         scope: &dyn Scoped,
         next_sibling: NodeRef,
     ) {
         let scope: Scope<COMP> = scope.to_any().downcast::<COMP>();
-        scope.reuse(self.props, scope_ref, next_sibling);
+        scope.reuse(self.props, comp_ref, next_sibling);
     }
 
     #[cfg(feature = "ssr")]
@@ -155,7 +150,7 @@ pub struct VChild<ICOMP: IntoComponent> {
     /// The component properties
     pub props: Rc<ICOMP::Properties>,
     /// Reference to the mounted node
-    scope_ref: Option<ComponentRef<ICOMP::Component>>,
+    comp_ref: Option<ComponentRef<ICOMP::Component>>,
     key: Option<Key>,
 }
 
@@ -163,7 +158,7 @@ impl<ICOMP: IntoComponent> Clone for VChild<ICOMP> {
     fn clone(&self) -> Self {
         VChild {
             props: Rc::clone(&self.props),
-            scope_ref: self.scope_ref.clone(),
+            comp_ref: self.comp_ref.clone(),
             key: self.key.clone(),
         }
     }
@@ -185,12 +180,12 @@ where
     /// Creates a child component that can be accessed and modified by its parent.
     pub fn new(
         props: ICOMP::Properties,
-        scope_ref: Option<ComponentRef<ICOMP::Component>>,
+        comp_ref: Option<ComponentRef<ICOMP::Component>>,
         key: Option<Key>,
     ) -> Self {
         Self {
             props: Rc::new(props),
-            scope_ref,
+            comp_ref,
             key,
         }
     }
@@ -201,7 +196,7 @@ where
     ICOMP: IntoComponent,
 {
     fn from(vchild: VChild<ICOMP>) -> Self {
-        VComp::new::<ICOMP>(vchild.props, vchild.scope_ref, vchild.key)
+        VComp::new::<ICOMP>(vchild.props, vchild.comp_ref, vchild.key)
     }
 }
 
@@ -209,7 +204,7 @@ impl VComp {
     /// Creates a new `VComp` instance.
     pub fn new<ICOMP>(
         props: Rc<ICOMP::Properties>,
-        scope_ref: Option<ComponentRef<ICOMP::Component>>,
+        comp_ref: Option<ComponentRef<ICOMP::Component>>,
         key: Option<Key>,
     ) -> Self
     where
@@ -217,7 +212,7 @@ impl VComp {
     {
         VComp {
             type_id: TypeId::of::<ICOMP::Component>(),
-            scope_ref: scope_ref.into(),
+            comp_ref: comp_ref.into(),
             mountable: Box::new(PropsWrapper::<ICOMP::Component>::new(props)),
             key,
         }

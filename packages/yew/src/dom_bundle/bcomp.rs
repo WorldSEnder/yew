@@ -54,7 +54,7 @@ impl Reconcilable for VComp {
         let VComp {
             type_id,
             mountable,
-            scope_ref,
+            comp_ref,
             key,
         } = self;
 
@@ -62,7 +62,7 @@ impl Reconcilable for VComp {
         let scope = mountable.mount(
             root,
             internal_ref.clone(),
-            scope_ref,
+            comp_ref,
             parent_scope,
             parent.to_owned(),
             next_sibling,
@@ -108,13 +108,13 @@ impl Reconcilable for VComp {
     ) -> NodeRef {
         let VComp {
             mountable,
-            scope_ref,
+            comp_ref,
             key,
             type_id: _,
         } = self;
 
         bcomp.key = key;
-        mountable.reuse(scope_ref, bcomp.scope.borrow(), next_sibling);
+        mountable.reuse(comp_ref, bcomp.scope.borrow(), next_sibling);
         bcomp.internal_ref.clone()
     }
 }
@@ -123,7 +123,7 @@ impl Reconcilable for VComp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dom_bundle::{Reconcilable, ReconcileTarget};
+    use crate::dom_bundle::{Bundle, Reconcilable, ReconcileTarget};
     use crate::html::ComponentAnyRef;
     use crate::{
         html,
@@ -237,7 +237,7 @@ mod tests {
                 VNode::VComp(vcomp) => vcomp,
                 _ => unreachable!("should be a vcomp"),
             };
-            assert_eq!(vcomp.scope_ref, internal_node_ref);
+            assert_eq!(vcomp.comp_ref, internal_node_ref);
         };
 
         let props = Props {
@@ -397,6 +397,26 @@ mod tests {
         elem.detach(&root, &parent, false);
         scheduler::start_now();
         assert!(node_ref.get().is_none());
+    }
+
+    #[test]
+    fn change_node_ref() {
+        let (root, scope, parent) = setup_parent();
+        let mut bundle = Bundle::new();
+
+        let first_ref = ComponentRef::default();
+        let second_ref = ComponentRef::default();
+        let first_elem = html! { <Comp ref={&first_ref}></Comp> };
+        bundle.reconcile(&root, &scope, &parent, NodeRef::default(), first_elem);
+        scheduler::start_now();
+        assert!(first_ref.get().is_some());
+        assert!(second_ref.get().is_none());
+
+        let second_elem = html! { <Comp ref={&second_ref}></Comp> };
+        bundle.reconcile(&root, &scope, &parent, NodeRef::default(), second_elem);
+        scheduler::start_now();
+        assert!(first_ref.get().is_none());
+        assert!(second_ref.get().is_some());
     }
 }
 
