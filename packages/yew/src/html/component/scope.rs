@@ -197,6 +197,7 @@ impl<COMP: BaseComponent> Scope<COMP> {
 #[cfg(feature = "ssr")]
 mod feat_ssr {
     use super::*;
+    use crate::html::ComponentAnyRef;
     use crate::scheduler;
     use futures::channel::oneshot;
 
@@ -222,6 +223,7 @@ mod feat_ssr {
                     initial_render_state: state,
                     props,
                     scope: self.clone(),
+                    comp_ref: ComponentAnyRef::default(),
                 }),
                 Box::new(RenderRunner {
                     state: self.state.clone(),
@@ -428,7 +430,7 @@ mod feat_csr {
             parent: Element,
             next_sibling: NodeRef,
             node_ref: NodeRef,
-            scope_ref: ComponentAnyRef,
+            comp_ref: ComponentAnyRef,
             props: Rc<COMP::Properties>,
         ) {
             let bundle = Bundle::new();
@@ -439,7 +441,6 @@ mod feat_csr {
                 node_ref,
                 parent,
                 next_sibling,
-                scope_ref,
             };
 
             scheduler::push_component_create(
@@ -448,6 +449,7 @@ mod feat_csr {
                     initial_render_state: state,
                     props,
                     scope: self.clone(),
+                    comp_ref,
                 }),
                 Box::new(RenderRunner {
                     state: self.state.clone(),
@@ -460,13 +462,13 @@ mod feat_csr {
         pub(crate) fn reuse(
             &self,
             props: Rc<COMP::Properties>,
-            scope_ref: ComponentAnyRef,
+            comp_ref: ComponentAnyRef,
             next_sibling: NodeRef,
         ) {
             #[cfg(debug_assertions)]
             super::super::log_event(self.id, "reuse");
 
-            self.push_update(UpdateEvent::Properties(props, scope_ref, next_sibling));
+            self.push_update(UpdateEvent::Properties(props, comp_ref, next_sibling));
         }
     }
 

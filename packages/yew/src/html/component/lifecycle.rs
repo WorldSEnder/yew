@@ -24,7 +24,6 @@ pub(crate) enum ComponentRenderState {
         parent: Element,
         next_sibling: NodeRef,
         node_ref: NodeRef,
-        scope_ref: ComponentAnyRef,
     },
 
     #[cfg(feature = "ssr")]
@@ -43,7 +42,6 @@ impl std::fmt::Debug for ComponentRenderState {
                 ref parent,
                 ref next_sibling,
                 ref node_ref,
-                ref scope_ref,
             } => f
                 .debug_struct("ComponentRenderState::Render")
                 .field("bundle", bundle)
@@ -51,7 +49,6 @@ impl std::fmt::Debug for ComponentRenderState {
                 .field("parent", parent)
                 .field("next_sibling", next_sibling)
                 .field("node_ref", node_ref)
-                .field("scope_ref", scope_ref)
                 .finish(),
 
             #[cfg(feature = "ssr")]
@@ -99,8 +96,9 @@ struct CompStateInner<COMP>
 where
     COMP: BaseComponent,
 {
-    pub(crate) component: COMP,
-    pub(crate) context: Context<COMP>,
+    component: COMP,
+    context: Context<COMP>,
+    comp_ref: ComponentAnyRef,
 }
 
 /// A trait to provide common,
@@ -116,7 +114,7 @@ pub(crate) trait Stateful {
     fn any_scope(&self) -> AnyScope;
 
     fn flush_messages(&mut self) -> bool;
-    fn props_changed(&mut self, props: Rc<dyn Any>) -> bool;
+    fn props_changed(&mut self, props: Rc<dyn Any>, comp_ref: ComponentAnyRef) -> bool;
 
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -131,11 +129,13 @@ where
     }
 
     fn rendered(&mut self, first_render: bool) {
+        self.comp_ref.set(Some(self.any_scope()));
         self.component.rendered(&self.context, first_render)
     }
 
     fn destroy(&mut self) {
         self.component.destroy(&self.context);
+        self.comp_ref.set(None);
     }
 
     fn any_scope(&self) -> AnyScope {
@@ -153,7 +153,11 @@ where
             })
     }
 
-    fn props_changed(&mut self, props: Rc<dyn Any>) -> bool {
+    fn props_changed(&mut self, props: Rc<dyn Any>, next_comp_ref: ComponentAnyRef) -> bool {
+        // When components are updated, a new node ref could have been passed in
+        self.comp_ref
+            .morph_into(next_comp_ref, || self.context.link().clone().into());
+
         let props = match Rc::downcast::<COMP::Properties>(props) {
             Ok(m) => m,
             _ => return false,
@@ -193,6 +197,7 @@ impl ComponentState {
         initial_render_state: ComponentRenderState,
         scope: Scope<COMP>,
         props: Rc<COMP::Properties>,
+        comp_ref: ComponentAnyRef,
     ) -> Self {
         let comp_id = scope.id;
         let context = Context { scope, props };
@@ -200,6 +205,7 @@ impl ComponentState {
         let inner = Box::new(CompStateInner {
             component: COMP::create(&context),
             context,
+            comp_ref,
         });
 
         Self {
@@ -229,6 +235,7 @@ pub(crate) struct CreateRunner<COMP: BaseComponent> {
     pub initial_render_state: ComponentRenderState,
     pub props: Rc<COMP::Properties>,
     pub scope: Scope<COMP>,
+    pub comp_ref: ComponentAnyRef,
 }
 
 impl<COMP: BaseComponent> Runnable for CreateRunner<COMP> {
@@ -242,6 +249,7 @@ impl<COMP: BaseComponent> Runnable for CreateRunner<COMP> {
                 self.initial_render_state,
                 self.scope.clone(),
                 self.props,
+                self.comp_ref,
             ));
         }
     }
@@ -267,20 +275,17 @@ impl Runnable for UpdateRunner {
                 UpdateEvent::Message => state.inner.flush_messages(),
 
                 #[cfg(feature = "csr")]
-                UpdateEvent::Properties(props, next_scope_ref, next_sibling) => {
+                UpdateEvent::Properties(props, next_comp_ref, next_sibling) => {
                     match state.render_state {
                         #[cfg(feature = "csr")]
                         ComponentRenderState::Render {
-                            ref mut scope_ref,
                             next_sibling: ref mut current_next_sibling,
                             ..
                         } => {
-                            // When components are updated, a new node ref could have been passed in
-                            scope_ref.morph_into(next_scope_ref, || state.inner.any_scope());
                             // When components are updated, their siblings were likely also updated
                             *current_next_sibling = next_sibling;
                             // Only trigger changed if props were changed
-                            state.inner.props_changed(props)
+                            state.inner.props_changed(props, next_comp_ref)
                         }
 
                         #[cfg(feature = "ssr")]
@@ -336,13 +341,11 @@ impl Runnable for DestroyRunner {
                     ref parent,
                     ref root,
                     ref node_ref,
-                    ref scope_ref,
                     ..
                 } => {
                     bundle.detach(root, parent, self.parent_to_detach);
 
                     node_ref.set(None);
-                    scope_ref.set(None);
                 }
 
                 #[cfg(feature = "ssr")]
@@ -438,11 +441,9 @@ impl RenderRunner {
                 ref root,
                 ref next_sibling,
                 ref node_ref,
-                ref scope_ref,
                 ..
             } => {
                 let scope = state.inner.any_scope();
-                scope_ref.set(Some(scope.clone()));
                 let new_node_ref =
                     bundle.reconcile(root, &scope, parent, next_sibling.clone(), new_root);
                 node_ref.link(new_node_ref);
