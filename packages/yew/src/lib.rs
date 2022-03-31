@@ -323,8 +323,8 @@ pub mod prelude {
     pub use crate::context::{ContextHandle, ContextProvider};
     pub use crate::events::*;
     pub use crate::html::{
-        create_portal, BaseComponent, Children, ChildrenWithProps, Classes, Component,
-        ComponentRef, Context, Html, HtmlResult, IntoComponent, NodeRef, Properties,
+        create_portal, BaseComponent, Children, ChildrenWithProps, Classes, Component, Context,
+        Html, HtmlResult, IntoComponent, NodeRef, Properties, Ref,
     };
     pub use crate::macros::{classes, html, html_nested};
     pub use crate::suspense::Suspense;

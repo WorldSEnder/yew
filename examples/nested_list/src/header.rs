@@ -6,7 +6,7 @@ use yew::prelude::*;
 pub struct Props {
     pub on_hover: Callback<Hovered>,
     pub text: String,
-    pub list_link: ComponentRef<List>,
+    pub list_link: Ref<List>,
 }
 
 pub struct ListHeader;

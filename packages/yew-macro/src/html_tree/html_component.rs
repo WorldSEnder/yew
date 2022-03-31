@@ -103,7 +103,7 @@ impl ToTokens for HtmlComponent {
         let build_props = props.build_properties_tokens(&props_ty, children_renderer);
 
         let special_props = props.special();
-        let comp_ref_ty = quote_spanned! {ty.span()=> ::yew::html::ComponentRef::< #comp_ty > };
+        let comp_ref_ty = quote_spanned! {ty.span()=> ::yew::html::Ref::< #comp_ty > };
         let node_ref = if let Some(node_ref) = &special_props.node_ref {
             let value = &node_ref.value;
             let value_quoted = quote_spanned! {value.span()=> #value };

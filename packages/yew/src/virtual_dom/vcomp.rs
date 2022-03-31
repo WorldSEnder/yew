@@ -2,7 +2,7 @@
 
 use super::Key;
 use crate::html::{BaseComponent, ErasedComponentRef, IntoComponent};
-use crate::ComponentRef;
+use crate::Ref;
 use std::any::TypeId;
 use std::fmt;
 use std::rc::Rc;
@@ -155,7 +155,7 @@ pub struct VChild<ICOMP: IntoComponent> {
     /// The component properties
     pub props: Rc<ICOMP::Properties>,
     /// Reference to the mounted node
-    comp_ref: Option<ComponentRef<ICOMP::Component>>,
+    comp_ref: Option<Ref<ICOMP::Component>>,
     key: Option<Key>,
 }
 
@@ -185,7 +185,7 @@ where
     /// Creates a child component that can be accessed and modified by its parent.
     pub fn new(
         props: ICOMP::Properties,
-        comp_ref: Option<ComponentRef<ICOMP::Component>>,
+        comp_ref: Option<Ref<ICOMP::Component>>,
         key: Option<Key>,
     ) -> Self {
         Self {
@@ -209,7 +209,7 @@ impl VComp {
     /// Creates a new `VComp` instance.
     pub fn new<ICOMP>(
         props: Rc<ICOMP::Properties>,
-        comp_ref: Option<ComponentRef<ICOMP::Component>>,
+        comp_ref: Option<Ref<ICOMP::Component>>,
         key: Option<Key>,
     ) -> Self
     where

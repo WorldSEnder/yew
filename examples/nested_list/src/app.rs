@@ -10,8 +10,8 @@ pub enum Msg {
 
 pub struct App {
     hovered: Hovered,
-    list_link: ComponentRef<List>,
-    sub_list_link: ComponentRef<List>,
+    list_link: Ref<List>,
+    sub_list_link: Ref<List>,
 }
 
 impl Component for App {
@@ -21,8 +21,8 @@ impl Component for App {
     fn create(_ctx: &Context<Self>) -> Self {
         Self {
             hovered: Hovered::None,
-            list_link: ComponentRef::new(),
-            sub_list_link: ComponentRef::new(),
+            list_link: Ref::<List>::new(),
+            sub_list_link: Ref::<List>::new(),
         }
     }
 

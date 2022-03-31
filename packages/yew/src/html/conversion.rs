@@ -1,6 +1,6 @@
-use super::{NodeRef, Scope};
+use super::{ComponentRef, NodeRef, Scope};
 use crate::virtual_dom::AttrValue;
-use crate::{BaseComponent, Callback, ComponentRef};
+use crate::{BaseComponent, Callback};
 use std::rc::Rc;
 
 /// Marker trait for types that the [`html!`](macro@crate::html) macro may clone implicitly.

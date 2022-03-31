@@ -130,7 +130,7 @@ mod tests {
         virtual_dom::{Key, VChild, VNode},
         Children, Component, Context, Html, NodeRef, Properties,
     };
-    use crate::{scheduler, ComponentRef};
+    use crate::{scheduler, Ref};
     use gloo_utils::document;
     use web_sys::Element;
 
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn set_component_node_ref() {
-        let test_node_ref = ComponentRef::new();
+        let test_node_ref = Ref::<Comp>::default();
         let internal_node_ref = <ErasedComponentRef as From<_>>::from(Some(test_node_ref.clone()));
         let check_node_ref = |vnode: VNode| {
             let vcomp = match vnode {
@@ -389,7 +389,7 @@ mod tests {
     fn reset_node_ref() {
         let (root, scope, parent) = setup_parent();
 
-        let node_ref = ComponentRef::default();
+        let node_ref = Ref::<Comp>::default();
         let elem = html! { <Comp ref={&node_ref}></Comp> };
         let (_, elem) = elem.attach(&root, &scope, &parent, NodeRef::default());
         scheduler::start_now();
@@ -404,8 +404,8 @@ mod tests {
         let (root, scope, parent) = setup_parent();
         let mut bundle = Bundle::new();
 
-        let first_ref = ComponentRef::default();
-        let second_ref = ComponentRef::default();
+        let first_ref = Ref::<Comp>::default();
+        let second_ref = Ref::<Comp>::default();
         let first_elem = html! { <Comp ref={&first_ref}></Comp> };
         bundle.reconcile(&root, &scope, &parent, NodeRef::default(), first_elem);
         scheduler::start_now();

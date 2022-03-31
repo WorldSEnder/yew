@@ -15,7 +15,7 @@ pub use listener::*;
 
 use crate::sealed::Sealed;
 use crate::virtual_dom::{VNode, VPortal};
-use std::cell::{Ref, RefCell};
+use std::cell::{Ref as CellRef, RefCell};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use wasm_bindgen::JsValue;
@@ -42,12 +42,110 @@ impl IntoHtmlResult for HtmlResult {
         self
     }
 }
+
 impl IntoHtmlResult for Html {
     #[inline(always)]
     fn into_html_result(self) -> HtmlResult {
         Ok(self)
     }
 }
+
+/// A trait of types that can have a Ref to them
+pub trait Referable {
+    /// The underlying concrete ref type
+    type RefType: 'static + Default + Clone + ImplicitClone;
+}
+
+impl<Referee: ?Sized> Referable for Referee
+where
+    GenericSeal<Referee>: SealedReferable,
+{
+    type RefType = <GenericSeal<Referee> as SealedReferable>::RefType;
+}
+
+#[doc(hidden)]
+pub trait SealedReferable: Sealed {
+    type RefType: 'static + Default + Clone + ImplicitClone;
+}
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct GenericSeal<G: ?Sized>(std::marker::PhantomData<G>);
+impl<G: ?Sized> Sealed for GenericSeal<G> {}
+
+impl<COMP: BaseComponent> SealedReferable for GenericSeal<COMP> {
+    type RefType = ComponentRef<COMP>;
+}
+impl SealedReferable for GenericSeal<Node> {
+    type RefType = NodeRef;
+}
+
+/// Wrapped reference to another component for later use in lifecycle methods.
+///
+/// # Example
+/// Send messages to a child component
+/// ```
+///# use yew::prelude::*;
+///
+/// struct MessageHolder {
+///     msg: String,
+/// }
+///
+/// impl Component for MessageHolder {
+///     type Message = String;
+///     type Properties = ();
+///
+///     fn create(_ctx: &Context<Self>) -> Self {
+///         Self {
+///             msg: "waiting...".to_string(),
+///         }
+///     }
+///
+///     fn update(&mut self, _ctx: &Context<Self>, message: Self::Message) -> bool {
+///         self.msg = message;
+///         true
+///     }
+///
+///     fn view(&self, _ctx: &Context<Self>) -> Html {
+///         html! { <span>{&self.msg}</span> }
+///     }
+/// }
+///
+/// pub struct Controller {
+///     log_ref: Ref<MessageHolder>,
+/// }
+///
+/// impl Component for Controller {
+///     type Message = ();
+///     type Properties = ();
+///
+///     fn create(_ctx: &Context<Self>) -> Self {
+///         Self {
+///             log_ref: Ref::<MessageHolder>::default(),
+///         }
+///     }
+///
+///     fn view(&self, _ctx: &Context<Self>) -> Html {
+///         let onclick = {
+///             let log_ref = self.log_ref.clone();
+///             Callback::from(move |_| {
+///                 log_ref.get()
+///                     .expect("a message holder")
+///                     .send_message("example message".to_string())
+///             })
+///         };
+///         html! {
+///             <>
+///                 <MessageHolder ref={&self.log_ref} />
+///                 <button {onclick}>{"Send example message"}</button>
+///             </>
+///         }
+///     }
+/// }
+/// ```
+/// ## Relevant examples
+/// - [`nested_list`](https://github.com/yewstack/yew/tree/master/examples/nested_list)
+pub type Ref<Referee> = <Referee as Referable>::RefType;
 
 /// Wrapped Node reference for later use in Component lifecycle methods.
 ///
@@ -134,71 +232,7 @@ impl NodeRef {
     }
 }
 
-/// Wrapped reference to another component for later use in lifecycle methods.
-///
-/// # Example
-/// Send messages to a child component
-/// ```
-///# use yew::prelude::*;
-///
-/// struct MessageHolder {
-///     msg: String,
-/// }
-///
-/// impl Component for MessageHolder {
-///     type Message = String;
-///     type Properties = ();
-///
-///     fn create(_ctx: &Context<Self>) -> Self {
-///         Self {
-///             msg: "waiting...".to_string(),
-///         }
-///     }
-///
-///     fn update(&mut self, _ctx: &Context<Self>, message: Self::Message) -> bool {
-///         self.msg = message;
-///         true
-///     }
-///
-///     fn view(&self, _ctx: &Context<Self>) -> Html {
-///         html! { <span>{&self.msg}</span> }
-///     }
-/// }
-///
-/// pub struct Controller {
-///     log_ref: ComponentRef<MessageHolder>,
-/// }
-///
-/// impl Component for Controller {
-///     type Message = ();
-///     type Properties = ();
-///
-///     fn create(_ctx: &Context<Self>) -> Self {
-///         Self {
-///             log_ref: ComponentRef::default(),
-///         }
-///     }
-///
-///     fn view(&self, _ctx: &Context<Self>) -> Html {
-///         let onclick = {
-///             let log_ref = self.log_ref.clone();
-///             Callback::from(move |_| {
-///                 log_ref.get()
-///                     .expect("a message holder")
-///                     .send_message("example message".to_string())
-///             })
-///         };
-///         html! {
-///             <>
-///                 <MessageHolder ref={&self.log_ref} />
-///                 <button {onclick}>{"Send example message"}</button>
-///             </>
-///         }
-///     }
-/// }
-/// ```
-/// ## Relevant examples
-/// - [`nested_list`](https://github.com/yewstack/yew/tree/master/examples/nested_list)
+#[doc(hidden)]
 pub struct ComponentRef<COMP: BaseComponent>(Rc<RefCell<CompRefInner>>, PhantomData<COMP>);
 
 impl<COMP: BaseComponent> std::fmt::Debug for ComponentRef<COMP> {
@@ -226,8 +260,8 @@ impl<COMP: BaseComponent> PartialEq for ComponentRef<COMP> {
 }
 
 impl<COMP: BaseComponent> ComponentRef<COMP> {
-    fn get_scope(&self) -> Ref<'_, Option<AnyScope>> {
-        Ref::map(self.0.borrow(), |s| &s.scope)
+    fn get_scope(&self) -> CellRef<'_, Option<AnyScope>> {
+        CellRef::map(self.0.borrow(), |s| &s.scope)
     }
 }
 

@@ -171,7 +171,7 @@ fn compile_pass() {
     };
 
     let props = <<Child as ::yew::Component>::Properties as ::std::default::Default>::default();
-    let node_ref = <::yew::ComponentRef<Child> as ::std::default::Default>::default();
+    let node_ref = <::yew::Ref<Child> as ::std::default::Default>::default();
     ::yew::html! {
         <>
             <Child ..::std::clone::Clone::clone(&props) />
@@ -218,7 +218,7 @@ fn compile_pass() {
         </>
     };
 
-    let node_ref = <::yew::ComponentRef<Child> as ::std::default::Default>::default();
+    let node_ref = <::yew::Ref<Child> as ::std::default::Default>::default();
     ::yew::html! {
         <>
             <Child int=1 ref={node_ref} />
@@ -226,7 +226,7 @@ fn compile_pass() {
     };
 
     let int = 1;
-    let node_ref = <::yew::ComponentRef<Child> as ::std::default::Default>::default();
+    let node_ref = <::yew::Ref<Child> as ::std::default::Default>::default();
     ::yew::html! {
         <>
             <Child {int} ref={node_ref} />
