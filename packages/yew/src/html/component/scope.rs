@@ -197,7 +197,7 @@ impl<COMP: BaseComponent> Scope<COMP> {
 #[cfg(feature = "ssr")]
 mod feat_ssr {
     use super::*;
-    use crate::html::ComponentAnyRef;
+    use crate::html::ErasedComponentRef;
     use crate::scheduler;
     use futures::channel::oneshot;
 
@@ -223,7 +223,7 @@ mod feat_ssr {
                     initial_render_state: state,
                     props,
                     scope: self.clone(),
-                    comp_ref: ComponentAnyRef::default(),
+                    comp_ref: ErasedComponentRef::default(),
                 }),
                 Box::new(RenderRunner {
                     state: self.state.clone(),
@@ -414,7 +414,7 @@ mod feat_csr {
     use crate::html::component::lifecycle::{
         ComponentRenderState, CreateRunner, DestroyRunner, RenderRunner,
     };
-    use crate::html::{ComponentAnyRef, NodeRef};
+    use crate::html::{ErasedComponentRef, NodeRef};
     use crate::scheduler;
     use std::cell::Ref;
     use web_sys::Element;
@@ -430,7 +430,7 @@ mod feat_csr {
             parent: Element,
             next_sibling: NodeRef,
             node_ref: NodeRef,
-            comp_ref: ComponentAnyRef,
+            comp_ref: ErasedComponentRef,
             props: Rc<COMP::Properties>,
         ) {
             let bundle = Bundle::new();
@@ -462,7 +462,7 @@ mod feat_csr {
         pub(crate) fn reuse(
             &self,
             props: Rc<COMP::Properties>,
-            comp_ref: ComponentAnyRef,
+            comp_ref: ErasedComponentRef,
             next_sibling: NodeRef,
         ) {
             #[cfg(debug_assertions)]

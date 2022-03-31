@@ -1,7 +1,7 @@
 //! This module contains the implementation of a virtual component (`VComp`).
 
 use super::Key;
-use crate::html::{BaseComponent, ComponentAnyRef, IntoComponent};
+use crate::html::{BaseComponent, ErasedComponentRef, IntoComponent};
 use crate::ComponentRef;
 use std::any::TypeId;
 use std::fmt;
@@ -24,7 +24,7 @@ use futures::future::{FutureExt, LocalBoxFuture};
 pub struct VComp {
     pub(crate) type_id: TypeId,
     pub(crate) mountable: Box<dyn Mountable>,
-    pub(crate) comp_ref: ComponentAnyRef,
+    pub(crate) comp_ref: ErasedComponentRef,
     pub(crate) key: Option<Key>,
 }
 
@@ -58,14 +58,19 @@ pub(crate) trait Mountable {
         self: Box<Self>,
         root: &BSubtree,
         node_ref: NodeRef,
-        comp_ref: ComponentAnyRef,
+        comp_ref: ErasedComponentRef,
         parent_scope: &AnyScope,
         parent: Element,
         next_sibling: NodeRef,
     ) -> Box<dyn Scoped>;
 
     #[cfg(feature = "csr")]
-    fn reuse(self: Box<Self>, comp_ref: ComponentAnyRef, scope: &dyn Scoped, next_sibling: NodeRef);
+    fn reuse(
+        self: Box<Self>,
+        comp_ref: ErasedComponentRef,
+        scope: &dyn Scoped,
+        next_sibling: NodeRef,
+    );
 
     #[cfg(feature = "ssr")]
     fn render_to_string<'a>(
@@ -99,7 +104,7 @@ impl<COMP: BaseComponent> Mountable for PropsWrapper<COMP> {
         self: Box<Self>,
         root: &BSubtree,
         node_ref: NodeRef,
-        comp_ref: ComponentAnyRef,
+        comp_ref: ErasedComponentRef,
         parent_scope: &AnyScope,
         parent: Element,
         next_sibling: NodeRef,
@@ -120,7 +125,7 @@ impl<COMP: BaseComponent> Mountable for PropsWrapper<COMP> {
     #[cfg(feature = "csr")]
     fn reuse(
         self: Box<Self>,
-        comp_ref: ComponentAnyRef,
+        comp_ref: ErasedComponentRef,
         scope: &dyn Scoped,
         next_sibling: NodeRef,
     ) {

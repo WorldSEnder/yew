@@ -12,7 +12,7 @@ use std::rc::Rc;
 #[cfg(feature = "csr")]
 use crate::dom_bundle::{BSubtree, Bundle};
 #[cfg(feature = "csr")]
-use crate::html::{ComponentAnyRef, NodeRef};
+use crate::html::{ErasedComponentRef, NodeRef};
 #[cfg(feature = "csr")]
 use web_sys::Element;
 
@@ -98,7 +98,7 @@ where
 {
     component: COMP,
     context: Context<COMP>,
-    comp_ref: ComponentAnyRef,
+    comp_ref: ErasedComponentRef,
 }
 
 /// A trait to provide common,
@@ -114,7 +114,7 @@ pub(crate) trait Stateful {
     fn any_scope(&self) -> AnyScope;
 
     fn flush_messages(&mut self) -> bool;
-    fn props_changed(&mut self, props: Rc<dyn Any>, comp_ref: ComponentAnyRef) -> bool;
+    fn props_changed(&mut self, props: Rc<dyn Any>, comp_ref: ErasedComponentRef) -> bool;
 
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -153,7 +153,7 @@ where
             })
     }
 
-    fn props_changed(&mut self, props: Rc<dyn Any>, next_comp_ref: ComponentAnyRef) -> bool {
+    fn props_changed(&mut self, props: Rc<dyn Any>, next_comp_ref: ErasedComponentRef) -> bool {
         // When components are updated, a new node ref could have been passed in
         self.comp_ref
             .morph_into(next_comp_ref, || self.context.link().clone().into());
@@ -197,7 +197,7 @@ impl ComponentState {
         initial_render_state: ComponentRenderState,
         scope: Scope<COMP>,
         props: Rc<COMP::Properties>,
-        comp_ref: ComponentAnyRef,
+        comp_ref: ErasedComponentRef,
     ) -> Self {
         let comp_id = scope.id;
         let context = Context { scope, props };
@@ -235,7 +235,7 @@ pub(crate) struct CreateRunner<COMP: BaseComponent> {
     pub initial_render_state: ComponentRenderState,
     pub props: Rc<COMP::Properties>,
     pub scope: Scope<COMP>,
-    pub comp_ref: ComponentAnyRef,
+    pub comp_ref: ErasedComponentRef,
 }
 
 impl<COMP: BaseComponent> Runnable for CreateRunner<COMP> {
@@ -260,7 +260,7 @@ pub(crate) enum UpdateEvent {
     Message,
     /// Wraps properties, node ref, and next sibling for a component
     #[cfg(feature = "csr")]
-    Properties(Rc<dyn Any>, ComponentAnyRef, NodeRef),
+    Properties(Rc<dyn Any>, ErasedComponentRef, NodeRef),
 }
 
 pub(crate) struct UpdateRunner {
@@ -635,7 +635,7 @@ mod tests {
             parent,
             NodeRef::default(),
             NodeRef::default(),
-            ComponentAnyRef::default(),
+            ErasedComponentRef::default(),
             Rc::new(props),
         );
         crate::scheduler::start_now();
