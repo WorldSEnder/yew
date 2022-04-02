@@ -1,14 +1,6 @@
-mod app;
-mod components;
-mod content;
-mod generator;
-mod pages;
-
-pub use app::*;
-
 fn main() {
     #[cfg(target_arch = "wasm32")]
     wasm_logger::init(wasm_logger::Config::new(log::Level::Trace));
     #[cfg(feature = "csr")]
-    yew::Renderer::<App>::new().render();
+    yew::Renderer::<function_router::App>::new().render();
 }
