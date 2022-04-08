@@ -288,36 +288,50 @@ impl FunctionComponent {
                 fn create(ctx: &::yew::html::Context<Self>) -> Self {
                     Self {
                         _marker: ::std::marker::PhantomData,
-                        function_component: ::yew::functional::FunctionComponent::<Self>::new(ctx),
+                        function_component: ::yew::functional::FunctionComponent::<Self>::create(ctx),
                     }
                 }
 
                 #[inline]
-                fn update(&mut self, _ctx: &::yew::html::Context<Self>, _msg: Self::Message) -> ::std::primitive::bool {
-                    true
-                }
-
-                #[inline]
-                fn changed(&mut self, _ctx: &::yew::html::Context<Self>) -> ::std::primitive::bool {
-                    true
-                }
-
-                #[inline]
-                fn view(&self, ctx: &::yew::html::Context<Self>) -> ::yew::html::HtmlResult {
-                    ::yew::functional::FunctionComponent::<Self>::render(
-                        &self.function_component,
-                        ::yew::html::Context::<Self>::props(ctx)
+                fn update(&mut self, ctx: &::yew::html::Context<Self>, msg: Self::Message) -> ::std::primitive::bool {
+                    ::yew::functional::FunctionComponent::<Self>::update(
+                        &mut self.function_component,
+                        ctx,
+                        msg,
                     )
                 }
 
                 #[inline]
-                fn rendered(&mut self, _ctx: &::yew::html::Context<Self>, _first_render: ::std::primitive::bool) {
-                    ::yew::functional::FunctionComponent::<Self>::rendered(&self.function_component)
+                fn changed(&mut self, ctx: &::yew::html::Context<Self>) -> ::std::primitive::bool {
+                    ::yew::functional::FunctionComponent::<Self>::changed(
+                        &mut self.function_component,
+                        ctx,
+                    )
                 }
 
                 #[inline]
-                fn destroy(&mut self, _ctx: &::yew::html::Context<Self>) {
-                    ::yew::functional::FunctionComponent::<Self>::destroy(&self.function_component)
+                fn view(&self, ctx: &::yew::html::Context<Self>) -> ::yew::html::HtmlResult {
+                    ::yew::functional::FunctionComponent::<Self>::view(
+                        &self.function_component,
+                        ctx,
+                    )
+                }
+
+                #[inline]
+                fn rendered(&mut self, ctx: &::yew::html::Context<Self>, first_render: ::std::primitive::bool) {
+                    ::yew::functional::FunctionComponent::<Self>::rendered(
+                        &mut self.function_component,
+                        ctx,
+                        first_render,
+                    )
+                }
+
+                #[inline]
+                fn destroy(&mut self, ctx: &::yew::html::Context<Self>) {
+                    ::yew::functional::FunctionComponent::<Self>::destroy(
+                        &mut self.function_component,
+                        ctx,
+                    )
                 }
             }
         }

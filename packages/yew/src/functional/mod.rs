@@ -204,6 +204,9 @@ pub trait FunctionProvider {
 }
 
 /// Wrapper that allows a struct implementing [`FunctionProvider`] to be consumed as a component.
+///
+/// A function component stores a field of `FunctionComponent<Self>` and forwards the lifecycle
+/// calls to this struct.
 pub struct FunctionComponent<T>
 where
     T: FunctionProvider,
@@ -214,13 +217,11 @@ where
 
 impl<T> FunctionComponent<T>
 where
-    T: FunctionProvider + 'static,
+    T: BaseComponent<Message = ()>
+        + FunctionProvider<Properties = <T as BaseComponent>::Properties>,
 {
     /// Creates a new function component.
-    pub fn new(ctx: &Context<T>) -> Self
-    where
-        T: BaseComponent<Message = ()> + FunctionProvider + 'static,
-    {
+    pub fn create(ctx: &Context<T>) -> Self {
         let scope = AnyScope::from(ctx.link().clone());
         let re_render = {
             let link = ctx.link().clone();
@@ -234,14 +235,24 @@ where
         }
     }
 
+    /// Process a message to the function component
+    pub fn update(&mut self, _ctx: &Context<T>, _msg: T::Message) -> bool {
+        true
+    }
+
+    /// Update a function component to changed properties
+    pub fn changed(&mut self, _ctx: &Context<T>) -> bool {
+        true
+    }
+
     /// Renders a function component.
-    pub fn render(&self, props: &T::Properties) -> HtmlResult {
+    pub fn view(&self, ctx: &Context<T>) -> HtmlResult {
         let mut hook_ctx = self.hook_ctx.borrow_mut();
 
         hook_ctx.prepare_run();
 
         #[allow(clippy::let_and_return)]
-        let result = T::run(&mut *hook_ctx, props);
+        let result = T::run(&mut *hook_ctx, ctx.props());
 
         #[cfg(debug_assertions)]
         hook_ctx.assert_hook_context(result.is_ok());
@@ -250,13 +261,13 @@ where
     }
 
     /// Run Effects of a function component.
-    pub fn rendered(&self) {
+    pub fn rendered(&mut self, _ctx: &Context<T>, _first_render: bool) {
         let hook_ctx = self.hook_ctx.borrow();
         hook_ctx.run_effects();
     }
 
     /// Destroys the function component.
-    pub fn destroy(&self) {
+    pub fn destroy(&mut self, _ctx: &Context<T>) {
         let mut hook_ctx = self.hook_ctx.borrow_mut();
         hook_ctx.drain_states();
     }
