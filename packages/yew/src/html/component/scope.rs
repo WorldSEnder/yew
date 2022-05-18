@@ -291,6 +291,7 @@ mod feat_ssr {
                     state: self.state.clone(),
                 }),
             );
+            scheduler::start();
 
             SsrScope {
                 scope: self.to_any(),
@@ -301,22 +302,28 @@ mod feat_ssr {
     }
 
     impl SsrScope {
-        pub(crate) async fn render_to_string(self, w: &mut SsrSink<'_>, hydratable: bool) {
-            scheduler::start();
-
-            let mut state_ref = self.state.borrow_mut();
+        pub(crate) async fn unblock(&self) {
             while let Some(suspended) = {
+                scheduler::start();
+                let mut state_ref = self.state.borrow_mut();
                 let state = state_ref.as_mut().expect("component exists");
                 state.suspension.clone()
             } {
                 suspended.await;
+            }
+        }
+
+        pub(crate) fn render_to_string(self, w: &mut SsrSink<'_>) {
+            let mut state_ref = self.state.borrow_mut();
+            let state = state_ref.as_mut().expect("component exists");
+            if state.suspension.is_some() {
                 drop(state_ref);
-                scheduler::start();
-                state_ref = self.state.borrow_mut();
+                w.push_suspended(self);
+                return;
             }
 
             let html = {
-                match state_ref.as_mut().expect("component exists").render_state {
+                match state.render_state {
                     ComponentRenderState::Ssr { ref mut target } => {
                         target.take().expect("component rendered")
                     }
@@ -325,13 +332,13 @@ mod feat_ssr {
             };
             drop(state_ref);
 
-            if hydratable {
+            if w.hydratable {
                 self.collectable.write_open_tag(w);
             }
 
-            html.render_to_string(w, &self.scope, hydratable).await;
+            html.render_to_string(w, &self.scope);
 
-            if hydratable {
+            if w.hydratable {
                 self.collectable.write_close_tag(w);
             }
 

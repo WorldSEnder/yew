@@ -1,4 +1,4 @@
-use std::fmt;
+use std::io;
 
 use crate::html::{BaseComponent, Scope};
 use crate::server_bundle::SsrSink;
@@ -61,21 +61,20 @@ where
 
     /// Renders Yew Application.
     pub async fn render(self) -> String {
-        let mut s = String::new();
+        let mut s = Vec::new();
 
         self.render_to_string(&mut s).await;
 
-        s
+        String::from_utf8(s).unwrap()
     }
 
     /// Renders Yew Application to a String.
-    pub async fn render_to_string(self, w: &mut dyn fmt::Write) {
-        let mut sink = SsrSink::new(w);
+    pub async fn render_to_string(self, w: &mut dyn io::Write) {
+        let mut sink = SsrSink::new(w, self.hydratable);
         let scope = Scope::<COMP>::new(None);
         scope
             .pre_render(self.props.into())
-            .render_to_string(&mut sink, self.hydratable)
-            .await;
+            .render_to_string(&mut sink);
         sink.run_to_completion().await;
     }
 }

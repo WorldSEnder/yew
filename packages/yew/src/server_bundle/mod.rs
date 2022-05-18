@@ -3,61 +3,95 @@
 //! Implements a very minimal version of DOM. I.e. components are run just before the 'rendered'
 //! lifecycle and then serialized to a string
 
-use std::fmt::{self, Arguments, Write};
+use std::collections::VecDeque;
+use std::fmt::Arguments;
+use std::io::Write;
 
+type Blocker = (Vec<u8>, SsrScope);
 pub(crate) struct SsrSink<'w> {
     output: &'w mut dyn Write,
-    buffer: String,
+    buffer: Vec<u8>,
+    current_blockers: VecDeque<Blocker>,
+    queued_blockers: Vec<VecDeque<Blocker>>,
+    pub(crate) hydratable: bool,
 }
 
 impl<'w> SsrSink<'w> {
-    pub(crate) fn new(output: &'w mut dyn Write) -> Self {
+    pub(crate) fn new(output: &'w mut dyn Write, hydratable: bool) -> Self {
         Self {
             output,
-            buffer: String::new(),
+            buffer: Vec::new(),
+            current_blockers: VecDeque::new(),
+            queued_blockers: vec![],
+            hydratable,
         }
     }
 
-    pub(self) fn write_fmt(&mut self, args: Arguments<'_>) -> fmt::Result {
-        self.buffer.write_fmt(args)
+    fn output(&mut self) -> &mut dyn Write {
+        if self.current_blockers.is_empty() {
+            &mut self.output
+        } else {
+            &mut self.buffer
+        }
+    }
+
+    pub(self) fn write_fmt(&mut self, args: Arguments<'_>) {
+        self.output().write_fmt(args).unwrap();
     }
 
     pub(self) fn push_str(&mut self, str: &str) {
-        self.buffer.push_str(str); // .expect("writing went wrong")
+        self.output()
+            .write_all(str.as_bytes())
+            .expect("writing went wrong");
     }
 
     pub(self) fn push_text(&mut self, text: &str) {
-        html_escape::encode_text_to_string(&text, &mut self.buffer);
+        html_escape::encode_text_to_writer(&text, &mut self.output()).unwrap();
     }
 
     pub(self) fn push_double_quoted_attr_value(&mut self, attr: &str) {
-        html_escape::encode_double_quoted_attribute_to_string(attr, &mut self.buffer);
+        html_escape::encode_double_quoted_attribute_to_writer(attr, &mut self.output()).unwrap();
     }
 
-    pub(crate) async fn run_to_completion(self) {
-        self.output.write_str(&self.buffer).unwrap()
+    pub(crate) fn push_suspended(&mut self, scope: SsrScope) {
+        let partial_buffer = std::mem::take(&mut self.buffer);
+        self.current_blockers.push_back((partial_buffer, scope));
+    }
+
+    pub(crate) async fn run_to_completion(mut self) {
+        if let Some((part, blocker)) = self.current_blockers.pop_front() {
+            self.output.write_all(&part).unwrap();
+            blocker.unblock().await;
+            if !self.current_blockers.is_empty() {
+                let shelved_blockers = std::mem::take(&mut self.current_blockers);
+                self.queued_blockers.push(shelved_blockers);
+            }
+
+            blocker.render_to_string(&mut self);
+
+            if self.current_blockers.is_empty() {
+                if let Some(unshelved_blockers) = self.queued_blockers.pop() {
+                    debug_assert!(!unshelved_blockers.is_empty());
+                    self.current_blockers = unshelved_blockers;
+                }
+            }
+        }
+        let rest = std::mem::take(&mut self.buffer);
+        self.output().write_all(&rest).unwrap();
     }
 }
 
-use crate::html::AnyScope;
+use crate::html::{AnyScope, SsrScope};
 use crate::virtual_dom::vcomp::*;
 
 impl VComp {
-    pub(crate) async fn render_to_string(
-        &self,
-        w: &mut SsrSink<'_>,
-        parent_scope: &AnyScope,
-        hydratable: bool,
-    ) {
+    pub(crate) fn render_to_string(&self, w: &mut SsrSink<'_>, parent_scope: &AnyScope) {
         self.mountable
             .as_ref()
             .pre_render(parent_scope)
-            .render_to_string(w, hydratable)
-            .await;
+            .render_to_string(w)
     }
 }
-
-use futures::future::{FutureExt, LocalBoxFuture};
 
 use crate::virtual_dom::vnode::*;
 
@@ -67,46 +101,33 @@ impl VNode {
         &'a self,
         w: &'a mut SsrSink<'_>,
         parent_scope: &'a AnyScope,
-        hydratable: bool,
-    ) -> LocalBoxFuture<'a, ()> {
-        async move {
-            match self {
-                VNode::VTag(vtag) => vtag.render_to_string(w, parent_scope, hydratable).await,
-                VNode::VText(vtext) => vtext.render_to_string(w, parent_scope, hydratable).await,
-                VNode::VComp(vcomp) => vcomp.render_to_string(w, parent_scope, hydratable).await,
-                VNode::VList(vlist) => vlist.render_to_string(w, parent_scope, hydratable).await,
-                // We are pretty safe here as it's not possible to get a web_sys::Node without
-                // DOM support in the first place.
-                //
-                // The only exception would be to use `ServerRenderer` in a browser or wasm32
-                // environment with jsdom present.
-                VNode::VRef(_) => {
-                    panic!("VRef is not possible to be rendered in to a string.")
-                }
-                // Portals are not rendered.
-                VNode::VPortal(_) => {}
-                VNode::VSuspense(vsuspense) => {
-                    vsuspense
-                        .render_to_string(w, parent_scope, hydratable)
-                        .await
-                }
+    ) {
+        match self {
+            VNode::VTag(vtag) => vtag.render_to_string(w, parent_scope),
+            VNode::VText(vtext) => vtext.render_to_string(w, parent_scope),
+            VNode::VComp(vcomp) => vcomp.render_to_string(w, parent_scope),
+            VNode::VList(vlist) => vlist.render_to_string(w, parent_scope),
+            // We are pretty safe here as it's not possible to get a web_sys::Node without
+            // DOM support in the first place.
+            //
+            // The only exception would be to use `ServerRenderer` in a browser or wasm32
+            // environment with jsdom present.
+            VNode::VRef(_) => {
+                panic!("VRef is not possible to be rendered in to a string.")
             }
+            // Portals are not rendered.
+            VNode::VPortal(_) => {}
+            VNode::VSuspense(vsuspense) => vsuspense.render_to_string(w, parent_scope),
         }
-        .boxed_local()
     }
 }
 
 use crate::virtual_dom::vlist::*;
 
 impl VList {
-    pub(crate) async fn render_to_string(
-        &self,
-        w: &mut SsrSink<'_>,
-        parent_scope: &AnyScope,
-        hydratable: bool,
-    ) {
+    pub(crate) fn render_to_string(&self, w: &mut SsrSink<'_>, parent_scope: &AnyScope) {
         for child in self.children.iter() {
-            child.render_to_string(w, parent_scope, hydratable).await
+            child.render_to_string(w, parent_scope)
         }
     }
 }
@@ -115,24 +136,17 @@ use crate::virtual_dom::vsuspense::*;
 use crate::virtual_dom::Collectable;
 
 impl VSuspense {
-    pub(crate) async fn render_to_string(
-        &self,
-        w: &mut SsrSink<'_>,
-        parent_scope: &AnyScope,
-        hydratable: bool,
-    ) {
+    pub(crate) fn render_to_string(&self, w: &mut SsrSink<'_>, parent_scope: &AnyScope) {
         let collectable = Collectable::Suspense;
 
-        if hydratable {
+        if w.hydratable {
             collectable.write_open_tag(w);
         }
 
         // always render children on the server side.
-        self.children
-            .render_to_string(w, parent_scope, hydratable)
-            .await;
+        self.children.render_to_string(w, parent_scope);
 
-        if hydratable {
+        if w.hydratable {
             collectable.write_close_tag(w);
         }
     }
@@ -147,16 +161,11 @@ static VOID_ELEMENTS: &[&str; 14] = &[
 ];
 
 impl VTag {
-    pub(crate) async fn render_to_string(
-        &self,
-        w: &mut SsrSink<'_>,
-        parent_scope: &AnyScope,
-        hydratable: bool,
-    ) {
-        write!(w, "<{}", self.tag()).unwrap();
+    pub(crate) fn render_to_string(&self, w: &mut SsrSink<'_>, parent_scope: &AnyScope) {
+        write!(w, "<{}", self.tag());
 
         let write_attr = |w: &mut SsrSink<'_>, name: &str, val: Option<&str>| {
-            write!(w, " {}", name).unwrap();
+            write!(w, " {}", name);
 
             if let Some(m) = val {
                 w.push_str("=\"");
@@ -179,15 +188,13 @@ impl VTag {
             write_attr(w, k, Some(v));
         }
 
-        write!(w, ">").unwrap();
+        write!(w, ">");
 
         match self.inner {
             VTagInner::Input(_) => {}
             VTagInner::Textarea { .. } => {
                 if let Some(m) = self.value() {
-                    VText::new(m.to_owned())
-                        .render_to_string(w, parent_scope, hydratable)
-                        .await;
+                    VText::new(m.to_owned()).render_to_string(w, parent_scope);
                 }
 
                 w.push_str("</textarea>");
@@ -198,9 +205,9 @@ impl VTag {
                 ..
             } => {
                 if !VOID_ELEMENTS.contains(&tag.as_ref()) {
-                    children.render_to_string(w, parent_scope, hydratable).await;
+                    children.render_to_string(w, parent_scope);
 
-                    write!(w, "</{}>", tag).unwrap();
+                    write!(w, "</{}>", tag);
                 } else {
                     // We don't write children of void elements nor closing tags.
                     debug_assert!(children.is_empty(), "{} cannot have any children!", tag);
@@ -213,12 +220,7 @@ impl VTag {
 use crate::virtual_dom::vtext::*;
 
 impl VText {
-    pub(crate) async fn render_to_string(
-        &self,
-        w: &mut SsrSink<'_>,
-        _parent_scope: &AnyScope,
-        _hydratable: bool,
-    ) {
+    pub(crate) fn render_to_string(&self, w: &mut SsrSink<'_>, _parent_scope: &AnyScope) {
         w.push_text(&self.text)
     }
 }
