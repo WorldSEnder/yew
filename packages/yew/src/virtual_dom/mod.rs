@@ -247,36 +247,6 @@ mod feat_ssr_hydration {
             }
         }
 
-        #[cfg(feature = "ssr")]
-        pub fn write_open_tag(&self, w: &mut String) {
-            w.push_str("<!--");
-            w.push_str(self.open_start_mark());
-
-            #[cfg(debug_assertions)]
-            match self {
-                Self::Component(type_name) => w.push_str(type_name),
-                Self::Suspense => {}
-            }
-
-            w.push_str(self.end_mark());
-            w.push_str("-->");
-        }
-
-        #[cfg(feature = "ssr")]
-        pub fn write_close_tag(&self, w: &mut String) {
-            w.push_str("<!--");
-            w.push_str(self.close_start_mark());
-
-            #[cfg(debug_assertions)]
-            match self {
-                Self::Component(type_name) => w.push_str(type_name),
-                Self::Suspense => {}
-            }
-
-            w.push_str(self.end_mark());
-            w.push_str("-->");
-        }
-
         #[cfg(feature = "hydration")]
         pub fn name(&self) -> super::Cow<'static, str> {
             match self {

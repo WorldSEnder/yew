@@ -284,6 +284,8 @@ mod io_coop;
 pub mod scheduler;
 mod sealed;
 #[cfg(feature = "ssr")]
+mod server_bundle;
+#[cfg(feature = "ssr")]
 mod server_renderer;
 pub mod suspense;
 pub mod utils;

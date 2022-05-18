@@ -144,34 +144,6 @@ mod test {
     }
 }
 
-#[cfg(feature = "ssr")]
-mod feat_ssr {
-    use super::*;
-    use crate::html::AnyScope;
-
-    impl VList {
-        pub(crate) async fn render_to_string(
-            &self,
-            w: &mut String,
-            parent_scope: &AnyScope,
-            hydratable: bool,
-        ) {
-            // Concurrently render all children.
-            for fragment in futures::future::join_all(self.children.iter().map(|m| async move {
-                let mut w = String::new();
-
-                m.render_to_string(&mut w, parent_scope, hydratable).await;
-
-                w
-            }))
-            .await
-            {
-                w.push_str(&fragment)
-            }
-        }
-    }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod ssr_tests {

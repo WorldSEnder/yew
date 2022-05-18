@@ -32,23 +32,6 @@ impl PartialEq for VText {
     }
 }
 
-#[cfg(feature = "ssr")]
-mod feat_ssr {
-    use super::*;
-    use crate::html::AnyScope;
-
-    impl VText {
-        pub(crate) async fn render_to_string(
-            &self,
-            w: &mut String,
-            _parent_scope: &AnyScope,
-            _hydratable: bool,
-        ) {
-            html_escape::encode_text_to_string(&self.text, w);
-        }
-    }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod ssr_tests {

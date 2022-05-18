@@ -40,9 +40,7 @@ pub(crate) enum ComponentRenderState {
     },
 
     #[cfg(feature = "ssr")]
-    Ssr {
-        sender: Option<futures::channel::oneshot::Sender<Html>>,
-    },
+    Ssr { target: Option<Html> },
 }
 
 impl std::fmt::Debug for ComponentRenderState {
@@ -81,14 +79,14 @@ impl std::fmt::Debug for ComponentRenderState {
                 .finish(),
 
             #[cfg(feature = "ssr")]
-            Self::Ssr { ref sender } => {
-                let sender_repr = match sender {
+            Self::Ssr { ref target } => {
+                let target_repr = match target {
                     Some(_) => "Some(_)",
                     None => "None",
                 };
 
                 f.debug_struct("ComponentRenderState::Ssr")
-                    .field("sender", &sender_repr)
+                    .field("sender", &target_repr)
                     .finish()
             }
         }
@@ -222,7 +220,7 @@ pub(crate) struct ComponentState {
     #[cfg(feature = "csr")]
     has_rendered: bool,
 
-    suspension: Option<Suspension>,
+    pub(super) suspension: Option<Suspension>,
 
     pub(crate) comp_id: usize,
 }
@@ -594,10 +592,8 @@ impl RenderRunner {
             }
 
             #[cfg(feature = "ssr")]
-            ComponentRenderState::Ssr { ref mut sender } => {
-                if let Some(tx) = sender.take() {
-                    tx.send(new_root).unwrap();
-                }
+            ComponentRenderState::Ssr { ref mut target } => {
+                *target = Some(new_root);
             }
         };
     }

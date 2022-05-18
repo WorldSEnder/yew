@@ -14,6 +14,8 @@ pub use marker::*;
 pub use properties::*;
 #[cfg(feature = "csr")]
 pub(crate) use scope::Scoped;
+#[cfg(feature = "ssr")]
+pub(crate) use scope::SsrScope;
 pub use scope::{AnyScope, Scope, SendAsMessage};
 
 use super::{Html, HtmlResult, IntoHtmlResult};

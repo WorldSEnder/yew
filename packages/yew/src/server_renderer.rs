@@ -1,4 +1,7 @@
+use std::fmt;
+
 use crate::html::{BaseComponent, Scope};
+use crate::server_bundle::SsrSink;
 
 /// A Yew Server-side Renderer.
 #[cfg_attr(documenting, doc(cfg(feature = "ssr")))]
@@ -66,10 +69,13 @@ where
     }
 
     /// Renders Yew Application to a String.
-    pub async fn render_to_string(self, w: &mut String) {
+    pub async fn render_to_string(self, w: &mut dyn fmt::Write) {
+        let mut sink = SsrSink::new(w);
         let scope = Scope::<COMP>::new(None);
         scope
-            .render_to_string(w, self.props.into(), self.hydratable)
+            .pre_render(self.props.into())
+            .render_to_string(&mut sink, self.hydratable)
             .await;
+        sink.run_to_completion().await;
     }
 }

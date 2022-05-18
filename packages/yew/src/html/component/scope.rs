@@ -260,24 +260,25 @@ impl<COMP: BaseComponent> Scope<COMP> {
 
 #[cfg(feature = "ssr")]
 mod feat_ssr {
-    use futures::channel::oneshot;
+    use std::cell::RefCell;
 
     use super::*;
     use crate::html::component::lifecycle::{
         ComponentRenderState, CreateRunner, DestroyRunner, RenderRunner,
     };
     use crate::scheduler;
+    use crate::server_bundle::SsrSink;
     use crate::virtual_dom::Collectable;
 
+    pub(crate) struct SsrScope {
+        scope: AnyScope,
+        state: Rc<RefCell<Option<ComponentState>>>,
+        collectable: Collectable,
+    }
+
     impl<COMP: BaseComponent> Scope<COMP> {
-        pub(crate) async fn render_to_string(
-            self,
-            w: &mut String,
-            props: Rc<COMP::Properties>,
-            hydratable: bool,
-        ) {
-            let (tx, rx) = oneshot::channel();
-            let state = ComponentRenderState::Ssr { sender: Some(tx) };
+        pub(crate) fn pre_render(self, props: Rc<COMP::Properties>) -> SsrScope {
+            let state = ComponentRenderState::Ssr { target: None };
 
             scheduler::push_component_create(
                 self.id,
@@ -290,21 +291,48 @@ mod feat_ssr {
                     state: self.state.clone(),
                 }),
             );
+
+            SsrScope {
+                scope: self.to_any(),
+                state: self.state,
+                collectable: Collectable::for_component::<COMP>(),
+            }
+        }
+    }
+
+    impl SsrScope {
+        pub(crate) async fn render_to_string(self, w: &mut SsrSink<'_>, hydratable: bool) {
             scheduler::start();
 
-            let collectable = Collectable::for_component::<COMP>();
-
-            if hydratable {
-                collectable.write_open_tag(w);
+            let mut state_ref = self.state.borrow_mut();
+            while let Some(suspended) = {
+                let state = state_ref.as_mut().expect("component exists");
+                state.suspension.clone()
+            } {
+                suspended.await;
+                drop(state_ref);
+                scheduler::start();
+                state_ref = self.state.borrow_mut();
             }
 
-            let html = rx.await.unwrap();
-
-            let self_any_scope = AnyScope::from(self.clone());
-            html.render_to_string(w, &self_any_scope, hydratable).await;
+            let html = {
+                match state_ref.as_mut().expect("component exists").render_state {
+                    ComponentRenderState::Ssr { ref mut target } => {
+                        target.take().expect("component rendered")
+                    }
+                    _ => unreachable!("component still in ssr mode"),
+                }
+            };
+            drop(state_ref);
 
             if hydratable {
-                collectable.write_close_tag(w);
+                self.collectable.write_open_tag(w);
+            }
+
+            html.render_to_string(w, &self.scope, hydratable).await;
+
+            if hydratable {
+                self.collectable.write_close_tag(w);
             }
 
             scheduler::push_component_destroy(Box::new(DestroyRunner {
@@ -315,6 +343,8 @@ mod feat_ssr {
         }
     }
 }
+#[cfg(feature = "ssr")]
+pub(crate) use feat_ssr::SsrScope;
 
 #[cfg(not(any(feature = "ssr", feature = "csr")))]
 mod feat_no_csr_ssr {

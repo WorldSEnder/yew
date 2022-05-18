@@ -24,37 +24,6 @@ impl VSuspense {
     }
 }
 
-#[cfg(feature = "ssr")]
-mod feat_ssr {
-    use super::*;
-    use crate::html::AnyScope;
-    use crate::virtual_dom::Collectable;
-
-    impl VSuspense {
-        pub(crate) async fn render_to_string(
-            &self,
-            w: &mut String,
-            parent_scope: &AnyScope,
-            hydratable: bool,
-        ) {
-            let collectable = Collectable::Suspense;
-
-            if hydratable {
-                collectable.write_open_tag(w);
-            }
-
-            // always render children on the server side.
-            self.children
-                .render_to_string(w, parent_scope, hydratable)
-                .await;
-
-            if hydratable {
-                collectable.write_close_tag(w);
-            }
-        }
-    }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod ssr_tests {

@@ -4,8 +4,6 @@ use std::any::TypeId;
 use std::fmt;
 use std::rc::Rc;
 
-#[cfg(feature = "ssr")]
-use futures::future::{FutureExt, LocalBoxFuture};
 #[cfg(feature = "csr")]
 use web_sys::Element;
 
@@ -67,12 +65,7 @@ pub(crate) trait Mountable {
     fn reuse(self: Box<Self>, scope: &dyn Scoped, next_sibling: NodeRef);
 
     #[cfg(feature = "ssr")]
-    fn render_to_string<'a>(
-        &'a self,
-        w: &'a mut String,
-        parent_scope: &'a AnyScope,
-        hydratable: bool,
-    ) -> LocalBoxFuture<'a, ()>;
+    fn pre_render(&self, parent_scope: &AnyScope) -> crate::html::SsrScope;
 
     #[cfg(feature = "hydration")]
     fn hydrate(
@@ -125,19 +118,9 @@ impl<COMP: BaseComponent> Mountable for PropsWrapper<COMP> {
     }
 
     #[cfg(feature = "ssr")]
-    fn render_to_string<'a>(
-        &'a self,
-        w: &'a mut String,
-        parent_scope: &'a AnyScope,
-        hydratable: bool,
-    ) -> LocalBoxFuture<'a, ()> {
-        async move {
-            let scope: Scope<COMP> = Scope::new(Some(parent_scope.clone()));
-            scope
-                .render_to_string(w, self.props.clone(), hydratable)
-                .await;
-        }
-        .boxed_local()
+    fn pre_render(&self, parent_scope: &AnyScope) -> crate::html::SsrScope {
+        let scope: Scope<COMP> = Scope::new(Some(parent_scope.clone()));
+        scope.pre_render(self.props.clone())
     }
 
     #[cfg(feature = "hydration")]
@@ -231,26 +214,6 @@ impl PartialEq for VComp {
 impl<COMP: BaseComponent> fmt::Debug for VChild<COMP> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("VChild<_>")
-    }
-}
-
-#[cfg(feature = "ssr")]
-mod feat_ssr {
-    use super::*;
-    use crate::html::AnyScope;
-
-    impl VComp {
-        pub(crate) async fn render_to_string(
-            &self,
-            w: &mut String,
-            parent_scope: &AnyScope,
-            hydratable: bool,
-        ) {
-            self.mountable
-                .as_ref()
-                .render_to_string(w, parent_scope, hydratable)
-                .await;
-        }
     }
 }
 
