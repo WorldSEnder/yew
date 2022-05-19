@@ -297,6 +297,22 @@ impl Attributes {
         Self::default()
     }
 
+    #[inline]
+    pub(crate) fn with_iter<'a, R>(
+        &'a self,
+        f: impl FnOnce(&mut dyn Iterator<Item = (&'a str, &'a str)>) -> R,
+    ) -> R {
+        match self {
+            Self::Static(arr) => f(arr.iter().map(|kv| (kv[0], kv[1] as &'a str)).by_ref()),
+            Self::Dynamic { keys, values } => f(keys
+                .iter()
+                .zip(values.iter())
+                .filter_map(|(k, v)| v.as_ref().map(|v| (*k, v.as_ref())))
+                .by_ref()),
+            Self::IndexMap(m) => f(m.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).by_ref()),
+        }
+    }
+
     /// Return iterator over attribute key-value pairs.
     /// This function is suboptimal and does not inline well. Avoid on hot paths.
     pub fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = (&'a str, &'a str)> + 'a> {

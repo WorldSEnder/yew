@@ -124,8 +124,9 @@ impl ToTokens for HtmlElement {
             .map(|attr| {
                 let value = &attr.value;
                 quote_spanned! {value.span()=>
-                    ::yew::html::IntoPropValue::<::yew::html::NodeRef>
-                    ::into_prop_value(#value)
+                    ::std::option::Option::Some(
+                        ::yew::html::IntoPropValue::<::yew::html::NodeRef>::into_prop_value(#value)
+                    )
                 }
             })
             .unwrap_or(quote! { ::std::default::Default::default() });

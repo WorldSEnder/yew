@@ -22,7 +22,7 @@ use crate::html::{BaseComponent, NodeRef};
 pub struct VComp {
     pub(crate) type_id: TypeId,
     pub(crate) mountable: Box<dyn Mountable>,
-    pub(crate) node_ref: NodeRef,
+    pub(crate) node_ref: Option<NodeRef>,
     pub(crate) key: Option<Key>,
 }
 
@@ -144,7 +144,7 @@ pub struct VChild<COMP: BaseComponent> {
     /// The component properties
     pub props: Rc<COMP::Properties>,
     /// Reference to the mounted node
-    node_ref: NodeRef,
+    node_ref: Option<NodeRef>,
     key: Option<Key>,
 }
 
@@ -172,7 +172,7 @@ where
     COMP: BaseComponent,
 {
     /// Creates a child component that can be accessed and modified by its parent.
-    pub fn new(props: COMP::Properties, node_ref: NodeRef, key: Option<Key>) -> Self {
+    pub fn new(props: COMP::Properties, node_ref: Option<NodeRef>, key: Option<Key>) -> Self {
         Self {
             props: Rc::new(props),
             node_ref,
@@ -192,7 +192,11 @@ where
 
 impl VComp {
     /// Creates a new `VComp` instance.
-    pub fn new<COMP>(props: Rc<COMP::Properties>, node_ref: NodeRef, key: Option<Key>) -> Self
+    pub fn new<COMP>(
+        props: Rc<COMP::Properties>,
+        node_ref: Option<NodeRef>,
+        key: Option<Key>,
+    ) -> Self
     where
         COMP: BaseComponent,
     {

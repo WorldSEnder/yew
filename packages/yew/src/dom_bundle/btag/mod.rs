@@ -121,6 +121,8 @@ impl Reconcilable for VTag {
             key,
             ..
         } = self;
+        let node_ref = node_ref.unwrap_or_default();
+
         insert_node(&el, parent, next_sibling.get().as_ref());
 
         let attributes = attributes.apply(root, &el);
@@ -226,12 +228,13 @@ impl Reconcilable for VTag {
         }
 
         tag.key = self.key;
+        let node_ref = self.node_ref.unwrap_or_default();
 
-        if self.node_ref != tag.node_ref && tag.node_ref.get().as_ref() == Some(el) {
+        if node_ref != tag.node_ref && tag.node_ref.get().as_ref() == Some(el) {
             tag.node_ref.set(None);
         }
-        if self.node_ref != tag.node_ref {
-            tag.node_ref = self.node_ref;
+        if node_ref != tag.node_ref {
+            tag.node_ref = node_ref;
             tag.node_ref.set(Some(el.clone().into()));
         }
 
@@ -315,6 +318,7 @@ mod feat_hydration {
                 node_ref,
                 key,
             } = self;
+            let node_ref = node_ref.unwrap_or_default();
 
             // We trim all text nodes as it's likely these are whitespaces.
             fragment.trim_start_text_nodes(parent);

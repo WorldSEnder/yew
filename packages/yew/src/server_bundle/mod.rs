@@ -184,9 +184,11 @@ impl VTag {
             }
         }
 
-        for (k, v) in self.attributes.iter() {
-            write_attr(w, k, Some(v));
-        }
+        self.attributes.with_iter(|iter| {
+            for (k, v) in iter {
+                write_attr(w, k, Some(v));
+            }
+        });
 
         write!(w, ">");
 

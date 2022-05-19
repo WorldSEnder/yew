@@ -67,6 +67,7 @@ impl Reconcilable for VComp {
             node_ref,
             key,
         } = self;
+        let node_ref = node_ref.unwrap_or_default();
         let internal_ref = NodeRef::default();
         node_ref.link(internal_ref.clone());
 
@@ -123,6 +124,7 @@ impl Reconcilable for VComp {
             key,
             type_id: _,
         } = self;
+        let node_ref = node_ref.unwrap_or_default();
 
         bcomp.key = key;
         let old_ref = std::mem::replace(&mut bcomp.node_ref, node_ref);
@@ -151,6 +153,7 @@ mod feat_hydration {
                 node_ref,
                 key,
             } = self;
+            let node_ref = node_ref.unwrap_or_default();
             let internal_ref = NodeRef::default();
             node_ref.link(internal_ref.clone());
 

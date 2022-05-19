@@ -105,9 +105,13 @@ impl ToTokens for HtmlComponent {
         let special_props = props.special();
         let node_ref = if let Some(node_ref) = &special_props.node_ref {
             let value = &node_ref.value;
-            quote_spanned! {value.span()=> #value }
+            quote_spanned! {value.span()=>
+                ::std::option::Option::Some(
+                    ::yew::html::IntoPropValue::<::yew::html::NodeRef>::into_prop_value(#value)
+                )
+            }
         } else {
-            quote! { <::yew::html::NodeRef as ::std::default::Default>::default() }
+            quote! { ::std::option::Option::None }
         };
 
         let key = if let Some(key) = &special_props.key {

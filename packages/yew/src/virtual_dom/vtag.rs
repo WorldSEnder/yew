@@ -124,7 +124,7 @@ pub struct VTag {
     /// List of attached listeners.
     pub(crate) listeners: Listeners,
     /// A node reference used for DOM access in Component lifecycle methods
-    pub node_ref: NodeRef,
+    pub(crate) node_ref: Option<NodeRef>,
     /// List of attributes.
     pub attributes: Attributes,
     pub key: Option<Key>,
@@ -165,7 +165,7 @@ impl VTag {
     pub fn __new_input(
         value: Option<AttrValue>,
         checked: bool,
-        node_ref: NodeRef,
+        node_ref: Option<NodeRef>,
         key: Option<Key>,
         // at bottom for more readable macro-expanded coded
         attributes: Attributes,
@@ -197,7 +197,7 @@ impl VTag {
     #[allow(clippy::too_many_arguments)]
     pub fn __new_textarea(
         value: Option<AttrValue>,
-        node_ref: NodeRef,
+        node_ref: Option<NodeRef>,
         key: Option<Key>,
         // at bottom for more readable macro-expanded coded
         attributes: Attributes,
@@ -224,7 +224,7 @@ impl VTag {
     #[allow(clippy::too_many_arguments)]
     pub fn __new_other(
         tag: Cow<'static, str>,
-        node_ref: NodeRef,
+        node_ref: Option<NodeRef>,
         key: Option<Key>,
         // at bottom for more readable macro-expanded coded
         attributes: Attributes,
@@ -245,7 +245,7 @@ impl VTag {
     #[allow(clippy::too_many_arguments)]
     fn new_base(
         inner: VTagInner,
-        node_ref: NodeRef,
+        node_ref: Option<NodeRef>,
         key: Option<Key>,
         attributes: Attributes,
         listeners: Listeners,

@@ -128,7 +128,7 @@ mod test {
         children.push(VNode::VTag({
             let mut tag = VTag::new("a");
             tag.key = Some(42u32.into());
-            Box::new(tag)
+            tag
         }));
         drop(children);
         assert!(vlist.fully_keyed, "should still be fully keyed");

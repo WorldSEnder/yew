@@ -111,7 +111,7 @@ impl ToTokens for DerivePropsInput {
 
                 fn builder() -> Self::Builder {
                     #builder_name {
-                        wrapped: ::std::boxed::Box::new(::std::default::Default::default()),
+                        wrapped: ::std::default::Default::default(),
                         _marker: ::std::marker::PhantomData,
                     }
                 }
