@@ -29,13 +29,14 @@ members = [
   "examples/portals",
   "examples/router",
   "examples/simple_ssr",
+  "examples/ssr_router",
+  "examples/suspense",
   "examples/timer",
   "examples/todomvc",
   "examples/two_apps",
   "examples/webgl",
+  "examples/web_components",
   "examples/web_worker_fib",
-  "examples/ssr_router",
-  "examples/suspense",
 
   # Tools
   "tools/benchmark-struct",
