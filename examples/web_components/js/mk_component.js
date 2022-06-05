@@ -18,7 +18,9 @@ export function make_component(impl) {
       impl.adopted(this);
     }
     attributeChangedCallback() {
-      impl.attributeChanged(this, this.#handle);
+      if (this.#handle != 0) {
+        impl.attributeChanged(this, this.#handle);
+      }
     }
     static get observedAttributes() {
       return impl.observedAttributes;
