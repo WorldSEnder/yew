@@ -170,6 +170,14 @@ extern "C" {
     fn make_component(desc: ComponentDescriptor) -> Function;
 }
 
+/// Define a custom element rendered by a Yew component.
+///
+/// The view of the Component will be rendered into an open shadow root attached
+/// to the element. The properties are realized from the attributes on the element,
+/// via the [`FromAttributeMap`] trait, and updated dynamically when changes are
+/// observed.
+///
+/// Note that custom element names must contain a hyphen.
 pub fn define<COMP: BaseComponent>(name: &str) -> Result<(), JsValue>
 where
     COMP::Properties: FromAttributeMap,
@@ -181,8 +189,11 @@ where
     Ok(())
 }
 
+/// Create properties from the attributes of an element.
 pub trait FromAttributeMap {
+    /// Create properties from the [`NamedNodeMap`] belonging to the attributes on an [`Element`].
     fn from_attributes(attrs: &NamedNodeMap) -> Self;
+    /// Return a list of attribute names to dynamically observe for changes.
     fn observed_attribute_names() -> Vec<String>;
 }
 
