@@ -1,9 +1,12 @@
 //! Structs for keeping track where in the DOM a node belongs
 
 use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::rc::Rc;
 
 use web_sys::{Element, Node};
+
+type PhantomNotSendNorSync = PhantomData<*const u8>;
 
 /// A position in the list of children of an implicit parent [`Element`].
 ///
@@ -301,7 +304,7 @@ mod feat_hydration {
     }
 }
 #[cfg(feature = "hydration")]
-pub use feat_hydration::SlotBulletin;
+pub(crate) use feat_hydration::SlotBulletin;
 
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 #[cfg(test)]
