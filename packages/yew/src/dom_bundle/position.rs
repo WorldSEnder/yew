@@ -53,13 +53,11 @@ impl Link {
         }
     }
 
-    fn dec_owner(&mut self) -> bool {
-        debug_assert!(self.has_owner, "must have an owner");
-        self.has_owner = false;
-        self.dec_ref()
-    }
-
-    fn dec_ref(&mut self) -> bool {
+    fn dec_ref(&mut self, owner: bool) -> bool {
+        if owner {
+            debug_assert!(self.has_owner, "must have an owner");
+            self.has_owner = false;
+        }
         debug_assert!(self.ref_count > 0, "must have refs");
         self.ref_count -= 1;
         self.ref_count == 0
@@ -75,10 +73,14 @@ const RESERVED_TRAP_SLOT: usize = 0;
 thread_local! {
     static DYNAMIC_SLOTS: RefCell<slab::Slab<Link>> = {
         let mut slots = Slab::new();
-        let mut fake_trap_link = Link::new(DomSlot::at_end());
-        fake_trap_link.add_ref(); // ensure this is never collected
-        fake_trap_link.dec_owner(); // has no owner though, so never written to
-        assert_eq!(slots.insert(fake_trap_link), RESERVED_TRAP_SLOT);
+        trap_impl::with_trap_ref(|trap| {
+            if let Some(trap) = trap {
+                let mut fake_trap_link = Link::new(DomSlot::at(trap.clone()));
+                fake_trap_link.add_ref();     // ensure this is never collected
+                fake_trap_link.dec_ref(true); // has no owner though, so never written to
+                assert_eq!(slots.insert(fake_trap_link), RESERVED_TRAP_SLOT);
+            }
+        });
         RefCell::new(slots)
     };
 }
@@ -114,12 +116,7 @@ mod trap_impl {
     #[cfg(all(debug_assertions, feature = "hydration"))]
     thread_local! {
         // A special marker element that should not be referenced
-        static TRAP: Node = {
-            use super::{DYNAMIC_SLOTS, DomSlot, RESERVED_TRAP_SLOT};
-            let node: Node = gloo::utils::document().create_element("div").unwrap().into();
-            DYNAMIC_SLOTS.with_borrow_mut(|slots| slots[RESERVED_TRAP_SLOT].parent = DomSlot::at(node.clone()));
-            node
-        };
+        static TRAP: Node = gloo::utils::document().create_element("div").unwrap().into();
     }
     #[inline]
     pub fn with_trap_ref<R>(f: impl FnOnce(Option<&Node>) -> R) -> R {
@@ -229,9 +226,7 @@ impl DynamicDomSlot {
     /// Get a [`DomSlot`] that gets automatically updated when `self` gets reassigned. All such
     /// slots are equivalent to each other and point to the same position.
     pub fn to_position(&self) -> DomSlot {
-        DomSlot {
-            variant: DomSlotVariant::Chained(self.clone_to_follower()),
-        }
+        self.clone_to_follower().into_position()
     }
 
     /// There can only be one owner of a dynamic dom slot. Reassigning a dom slot is only allowed
@@ -248,12 +243,7 @@ impl DynamicDomSlot {
 }
 
 fn remove_link(slots: &mut Slab<Link>, link: LinkId, owner: bool) {
-    let was_last = if owner {
-        slots[link].dec_owner()
-    } else {
-        slots[link].dec_ref()
-    };
-    if !was_last {
+    if !slots[link].dec_ref(owner) {
         return;
     }
     let mut link = link;
@@ -262,12 +252,18 @@ fn remove_link(slots: &mut Slab<Link>, link: LinkId, owner: bool) {
         let DomSlotVariant::Chained(handle) = removed.parent.variant else {
             break;
         };
-        if !slots[handle.link].dec_ref() {
+        if !slots[handle.link].dec_ref(false) {
             break;
         }
         link = handle.link;
     }
     // from time to time, clean up memory in the slab
+    // TODO: this needs more analysis under amortized runtime costs and a clever potential
+    // definition. shrink_to_fit will first check if there are any vacant slots at "the end". If
+    // there are, it will then do a full pass over empty and filled slots. The problem is that
+    // "the end" is not easily available from the public API. We know it's somewhere between
+    // len() and capacity(), and also past the link(s) we just removed. But we can't check the
+    // internal entries.len().
     const ALLOWED_SLACK: usize = 1024 * 1024 * 1024 / size_of::<Link>();
     if slots.capacity() / 4 > slots.len() && slots.capacity() - slots.len() > ALLOWED_SLACK {
         slots.shrink_to_fit();
@@ -283,6 +279,12 @@ impl Drop for DynamicDomSlot {
 }
 
 impl DynamicDomSlotHandle {
+    fn into_position(self) -> DomSlot {
+        DomSlot {
+            variant: DomSlotVariant::Chained(self),
+        }
+    }
+
     /// Reassign through a handle. This is only valid if the owning [DynamicDomSlot] is still alive.
     fn reassign_unchecked(&self, next_position: DomSlot) {
         // TODO: is not defensive against accidental reference loops
@@ -331,21 +333,25 @@ mod feat_hydration {
 
     use web_sys::Node;
 
-    use super::{
-        DomSlot, DomSlotVariant, DynamicDomSlot, DynamicDomSlotHandle, RESERVED_TRAP_SLOT,
-    };
+    use super::{DomSlot, DynamicDomSlot, DynamicDomSlotHandle, RESERVED_TRAP_SLOT};
+
+    fn trapped_position() -> DomSlot {
+        super::trap_impl::with_trap_ref(|trap| match trap {
+            Some(_) => {
+                // this handle exists only if we have a trap node
+                let fake_handle = DynamicDomSlotHandle {
+                    link: RESERVED_TRAP_SLOT,
+                    _phantom: PhantomData,
+                };
+                fake_handle.into_position()
+            }
+            None => DomSlot::at_end(),
+        })
+    }
 
     impl DynamicDomSlot {
         pub fn new_debug_trapped() -> Self {
-            // make sure the trap is initialized before we return
-            let _ = super::trap_impl::with_trap_ref(|_| ());
-            let trap_handle = DomSlot {
-                variant: DomSlotVariant::Chained(DynamicDomSlotHandle {
-                    link: RESERVED_TRAP_SLOT,
-                    _phantom: PhantomData,
-                }),
-            };
-            Self::new(trap_handle)
+            Self::new(trapped_position())
         }
 
         /// Move out of self, leaving behind a trapped slot. `self` should not be used afterwards.
