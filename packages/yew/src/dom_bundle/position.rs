@@ -72,7 +72,7 @@ impl Link {
 }
 
 thread_local! {
-    static DYNAMIC_SLOTS: RefCell<slab::Slab<Link>> = RefCell::new(Slab::new());
+    static DYNAMIC_SLOTS: RefCell<slab::Slab<Link>> = const { RefCell::new(Slab::new()) };
 }
 
 type LinkId = usize; // Dictated by slab
