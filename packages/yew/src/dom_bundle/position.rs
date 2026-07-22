@@ -209,7 +209,12 @@ impl DynamicDomSlot {
     /// Create a dynamic dom slot that initially represents ("targets") the same slot as the
     /// argument.
     pub fn new(initial_position: DomSlot) -> Self {
-        let link = DYNAMIC_SLOTS.with_borrow_mut(|slots| slots.insert(Link::new(initial_position)));
+        let link = DYNAMIC_SLOTS.with_borrow_mut(|slots| {
+            if let DomSlotVariant::Chained(parent) = &initial_position.variant {
+                slots.get_mut(parent.link).unwrap().add_ref();
+            }
+            slots.insert(Link::new(initial_position))
+        });
         Self {
             link,
             _phantom: PhantomData,
@@ -318,16 +323,17 @@ impl DynamicDomSlotHandle {
     fn with_next_sibling<R>(&self, f: impl FnOnce(Option<&Node>) -> R) -> R {
         // We use an iterative approach to traverse a possible long chain of references.
         // See issue #3043 for why a recursive call is impossible for large lists in vdom.
-        DYNAMIC_SLOTS.with_borrow(|slots| {
+        let node = DYNAMIC_SLOTS.with_borrow(|slots| {
             let mut link = self.link;
             loop {
                 match &slots.get(link).unwrap().parent.variant {
-                    // NOTE: This leaves the slots borrowed. We can't re-enter mutably!
-                    DomSlotVariant::Node(node) => return f(node.as_ref()),
+                    // NOTE: We clone to drop the borrow and let f re-enter this method
+                    DomSlotVariant::Node(node) => break node.clone(),
                     DomSlotVariant::Chained(handle) => link = handle.link,
                 }
             }
-        })
+        });
+        f(node.as_ref())
     }
 }
 

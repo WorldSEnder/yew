@@ -207,19 +207,19 @@ mod tests {
 
     #[test]
     fn set_properties_to_component() {
-        html! {
+        let _ = html! {
             <Comp />
         };
 
-        html! {
+        let _ = html! {
             <Comp field_1=1 />
         };
 
-        html! {
+        let _ = html! {
             <Comp field_2=2 />
         };
 
-        html! {
+        let _ = html! {
             <Comp field_1=1 field_2=2 />
         };
 
@@ -228,7 +228,7 @@ mod tests {
             field_2: 1,
         };
 
-        html! {
+        let _ = html! {
             <Comp ..props />
         };
     }
