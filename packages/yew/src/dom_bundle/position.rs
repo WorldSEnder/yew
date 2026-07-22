@@ -2,8 +2,8 @@
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
-use std::rc::Rc;
 
+use slab::Slab;
 use web_sys::{Element, Node};
 
 type PhantomNotSendNorSync = PhantomData<*const u8>;
@@ -15,26 +15,6 @@ type PhantomNotSendNorSync = PhantomData<*const u8>;
 #[derive(Clone)]
 pub(crate) struct DomSlot {
     variant: DomSlotVariant,
-}
-
-enum DomSlotVariant {
-    Node(Option<Node>),
-    Chained(DynamicDomSlot),
-}
-
-impl Clone for DomSlotVariant {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Node(node) => Self::Node(node.clone()),
-            Self::Chained(slot) => Self::Chained(slot.clone_to_follower()),
-        }
-    }
-}
-
-/// A dynamic dom slot can be reassigned. This change is also seen by the [`DomSlot`] from
-/// [`Self::to_position`] before the reassignment took place.
-pub(crate) struct DynamicDomSlot {
-    target: Rc<RefCell<DomSlot>>,
 }
 
 impl std::fmt::Debug for DomSlot {
@@ -50,10 +30,72 @@ impl std::fmt::Debug for DomSlot {
     }
 }
 
+#[derive(Clone)]
+enum DomSlotVariant {
+    Node(Option<Node>),
+    Chained(DynamicDomSlotHandle),
+}
+
+struct Link {
+    parent: DomSlot,
+    /// counts the owner + the number of links in DYNAMIC_SLOTS that refer to this link
+    /// does NOT count the number of handles
+    ref_count: usize,
+    has_owner: bool,
+}
+
+impl Link {
+    fn new(parent: DomSlot) -> Self {
+        Self {
+            parent,
+            ref_count: 1,
+            has_owner: true,
+        }
+    }
+
+    fn dec_owner(&mut self) -> bool {
+        debug_assert!(self.has_owner, "must have an owner");
+        self.has_owner = false;
+        self.dec_ref()
+    }
+
+    fn dec_ref(&mut self) -> bool {
+        debug_assert!(self.ref_count > 0, "must have refs");
+        self.ref_count -= 1;
+        self.ref_count == 0
+    }
+
+    fn add_ref(&mut self) {
+        debug_assert!(self.ref_count > 0, "no revives");
+        self.ref_count += 1;
+    }
+}
+
+thread_local! {
+    static DYNAMIC_SLOTS: RefCell<slab::Slab<Link>> = RefCell::new(Slab::new());
+}
+
+type LinkId = usize; // Dictated by slab
+
+/// A dynamic dom slot can be reassigned. This change is also seen by the [`DomSlot`] from
+/// [`Self::to_position`] before the reassignment took place.
+pub(crate) struct DynamicDomSlot {
+    link: LinkId,
+    // The link is tied to this specific thread and can't be accessed elsewhere
+    _phantom: PhantomNotSendNorSync,
+}
+
 impl std::fmt::Debug for DynamicDomSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:#?}", *self.target.borrow())
+        write!(f, "#{}", self.link)
     }
+}
+
+#[derive(Clone)]
+struct DynamicDomSlotHandle {
+    link: LinkId,
+    // The link is tied to this specific thread and can't be accessed elsewhere
+    _phantom: PhantomNotSendNorSync,
 }
 
 mod trap_impl {
@@ -167,8 +209,10 @@ impl DynamicDomSlot {
     /// Create a dynamic dom slot that initially represents ("targets") the same slot as the
     /// argument.
     pub fn new(initial_position: DomSlot) -> Self {
+        let link = DYNAMIC_SLOTS.with_borrow_mut(|slots| slots.insert(Link::new(initial_position)));
         Self {
-            target: Rc::new(RefCell::new(initial_position)),
+            link,
+            _phantom: PhantomData,
         }
     }
 
@@ -188,8 +232,7 @@ impl DynamicDomSlot {
     /// Change the [`DomSlot`] that is targeted. Subsequently, this will behave as if `self` was
     /// created from the passed DomSlot in the first place.
     pub fn reassign(&self, next_position: DomSlot) {
-        // TODO: is not defensive against accidental reference loops
-        *self.target.borrow_mut() = next_position;
+        self.clone_to_follower().reassign_unchecked(next_position);
     }
 
     /// Get a [`DomSlot`] that gets automatically updated when `self` gets reassigned. All such
@@ -205,48 +248,86 @@ impl DynamicDomSlot {
     /// and should only read the value, but never write to it.
     /// This does not imply that access is always serialized! Followers are allowed to write at any
     /// point without prior synchronization, as long as they ensure that the owner is still alive.
-    fn clone_to_follower(&self) -> Self {
-        // TODO: the return value could be a different type
-        Self {
-            target: self.target.clone(),
+    fn clone_to_follower(&self) -> DynamicDomSlotHandle {
+        DynamicDomSlotHandle {
+            link: self.link,
+            _phantom: self._phantom,
         }
+    }
+}
+
+fn remove_link(slots: &mut Slab<Link>, link: LinkId) {
+    let mut link = link;
+    loop {
+        let removed = slots.remove(link);
+        let DomSlotVariant::Chained(handle) = removed.parent.variant else {
+            break;
+        };
+        if !slots.get_mut(handle.link).unwrap().dec_ref() {
+            break;
+        }
+        link = handle.link;
+    }
+    // from time to time, clean up memory in the slab
+    const ALLOWED_SLACK: usize = 1024 * 1024 * 1024 / size_of::<Link>();
+    if slots.capacity() / 4 > slots.len() && slots.capacity() - slots.len() > ALLOWED_SLACK {
+        slots.shrink_to_fit();
+    }
+}
+
+impl Drop for DynamicDomSlot {
+    fn drop(&mut self) {
+        DYNAMIC_SLOTS.with_borrow_mut(|slots| {
+            if slots.get_mut(self.link).unwrap().dec_owner() {
+                remove_link(slots, self.link);
+            }
+        });
+    }
+}
+
+impl DynamicDomSlotHandle {
+    /// Reassign through a handle. This is only valid if the owning [DynamicDomSlot] is still alive.
+    fn reassign_unchecked(&self, next_position: DomSlot) {
+        // TODO: is not defensive against accidental reference loops
+        DYNAMIC_SLOTS.with_borrow_mut(|slots| {
+            let old_parent = slots.get_mut(self.link).unwrap().parent.clone();
+            match (&old_parent.variant, &next_position.variant) {
+                (DomSlotVariant::Node(_), DomSlotVariant::Node(_)) => {}
+                (DomSlotVariant::Node(_), DomSlotVariant::Chained(new_parent)) => {
+                    slots.get_mut(new_parent.link).unwrap().add_ref();
+                }
+                (DomSlotVariant::Chained(old_parent), DomSlotVariant::Node(_)) => {
+                    if slots.get_mut(old_parent.link).unwrap().dec_ref() {
+                        remove_link(slots, old_parent.link);
+                    }
+                }
+                (DomSlotVariant::Chained(old_parent), DomSlotVariant::Chained(new_parent)) => {
+                    if old_parent.link == new_parent.link {
+                        return;
+                    }
+                    slots.get_mut(new_parent.link).unwrap().add_ref();
+                    if slots.get_mut(old_parent.link).unwrap().dec_ref() {
+                        remove_link(slots, old_parent.link);
+                    }
+                }
+            }
+            slots.get_mut(self.link).unwrap().parent = next_position;
+        });
     }
 
     fn with_next_sibling<R>(&self, f: impl FnOnce(Option<&Node>) -> R) -> R {
         // We use an iterative approach to traverse a possible long chain of references.
         // See issue #3043 for why a recursive call is impossible for large lists in vdom.
-        //
-        // TODO: there could be some data structure that performs better here. E.g. a balanced tree
-        // with parent pointers come to mind, but they are a bit fiddly to implement in rust
-        //
-        // We traverse via raw pointers to avoid Rc refcount overhead (clone + drop) per hop, then
-        // clone the terminal next-sibling out of the chain before invoking `f`. Invoking `f` with
-        // no borrow held and no reliance on chain structure keeps the traversal sound: `f` runs
-        // arbitrary code (panic drop glue, `gloo::console::error`, tracing subscribers) that
-        // could, in principle, reassign a link in the chain and drop the last strong reference
-        // to the RefCell we would otherwise still borrow from.
-        //
-        // SAFETY: All RefCells visited by the loop remain live while we dereference them:
-        // - `self.target` (Rc) is alive because `self` is borrowed
-        // - Each DomSlot::Chained(DynamicDomSlot { target }) in the chain holds a strong Rc to the
-        //   next RefCell, so all links are transitively kept alive
-        // - Yew is single-threaded and the loop body does not run user code, so no mutable borrow
-        //   (e.g. from reassign()) can occur on any RefCell in the chain during traversal
-        // - Each RefCell::borrow() is dropped before advancing to the next hop
-        let node: Option<Node> = {
-            let mut ptr: *const RefCell<DomSlot> = Rc::as_ptr(&self.target);
+        DYNAMIC_SLOTS.with_borrow(|slots| {
+            let mut link = self.link;
             loop {
-                let cell = unsafe { &*ptr };
-                let slot_ref = cell.borrow();
-                match &slot_ref.variant {
-                    DomSlotVariant::Node(n) => break n.clone(),
-                    DomSlotVariant::Chained(chain) => {
-                        ptr = Rc::as_ptr(&chain.target);
-                    }
+                match &slots.get(link).unwrap().parent.variant {
+                    // NOTE: This leaves the slots borrowed. We can't re-enter mutably!
+                    DomSlotVariant::Node(node) => return f(node.as_ref()),
+                    DomSlotVariant::Chained(handle) => link = handle.link,
                 }
             }
-        };
-        f(node.as_ref())
+        })
     }
 }
 
@@ -256,10 +337,10 @@ mod feat_hydration {
 
     use web_sys::Node;
 
-    use super::{DomSlot, DynamicDomSlot};
+    use super::{DomSlot, DynamicDomSlot, DynamicDomSlotHandle};
 
     pub struct SlotBulletin<'tree> {
-        prev_next_sibling: Option<DynamicDomSlot>,
+        prev_next_sibling: Option<DynamicDomSlotHandle>,
         _owner: PhantomData<&'tree mut DynamicDomSlot>,
     }
     impl<'tree> SlotBulletin<'tree> {
@@ -280,7 +361,7 @@ mod feat_hydration {
 
         fn write(&mut self, pos: DomSlot) {
             if let Some(slot) = &mut self.prev_next_sibling {
-                slot.reassign(pos);
+                slot.reassign_unchecked(pos);
             }
         }
 
