@@ -14,15 +14,22 @@ pub(crate) struct DomSlot {
     variant: DomSlotVariant,
 }
 
-#[derive(Clone)]
 enum DomSlotVariant {
     Node(Option<Node>),
     Chained(DynamicDomSlot),
 }
 
+impl Clone for DomSlotVariant {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Node(node) => Self::Node(node.clone()),
+            Self::Chained(slot) => Self::Chained(slot.clone_to_follower()),
+        }
+    }
+}
+
 /// A dynamic dom slot can be reassigned. This change is also seen by the [`DomSlot`] from
 /// [`Self::to_position`] before the reassignment took place.
-#[derive(Clone)]
 pub(crate) struct DynamicDomSlot {
     target: Rc<RefCell<DomSlot>>,
 }
@@ -186,7 +193,19 @@ impl DynamicDomSlot {
     /// slots are equivalent to each other and point to the same position.
     pub fn to_position(&self) -> DomSlot {
         DomSlot {
-            variant: DomSlotVariant::Chained(self.clone()),
+            variant: DomSlotVariant::Chained(self.clone_to_follower()),
+        }
+    }
+
+    /// There can only be one owner of a dynamic dom slot. Reassigning a dom slot is only allowed
+    /// while that owner is still alive. All other accesses (e.g. through DomSlot) are followers
+    /// and should only read the value, but never write to it.
+    /// This does not imply that access is always serialized! Followers are allowed to write at any
+    /// point without prior synchronization, as long as they ensure that the owner is still alive.
+    fn clone_to_follower(&self) -> Self {
+        // TODO: the return value could be a different type
+        Self {
+            target: self.target.clone(),
         }
     }
 
@@ -227,6 +246,62 @@ impl DynamicDomSlot {
         f(node.as_ref())
     }
 }
+
+#[cfg(feature = "hydration")]
+mod feat_hydration {
+    use std::marker::PhantomData;
+
+    use web_sys::Node;
+
+    use super::{DomSlot, DynamicDomSlot};
+
+    pub struct SlotBulletin<'tree> {
+        prev_next_sibling: Option<DynamicDomSlot>,
+        _owner: PhantomData<&'tree mut DynamicDomSlot>,
+    }
+    impl<'tree> SlotBulletin<'tree> {
+        pub fn start(slot: &'tree mut DynamicDomSlot) -> Self {
+            // We take a follower, but we are sure the owner is alive
+            Self {
+                prev_next_sibling: Some(slot.clone_to_follower()),
+                _owner: PhantomData,
+            }
+        }
+
+        pub fn new() -> Self {
+            Self {
+                prev_next_sibling: None,
+                _owner: PhantomData,
+            }
+        }
+
+        fn write(&mut self, pos: DomSlot) {
+            if let Some(slot) = &mut self.prev_next_sibling {
+                slot.reassign(pos);
+            }
+        }
+
+        pub fn write_at_node(&mut self, node: Node) {
+            self.write(DomSlot::at(node));
+            self.prev_next_sibling = None;
+        }
+
+        // This method does not track that `inner_next_sibling` (which is the owner) lives for
+        // lifetime of this call. This must be done by the caller, which puts it somewhere in
+        // its component state
+        pub fn write_at_comp(&mut self, slot: DomSlot, inner_next_sibling: &DynamicDomSlot) {
+            self.write(slot);
+            self.prev_next_sibling = Some(inner_next_sibling.clone_to_follower());
+        }
+    }
+    impl Drop for SlotBulletin<'_> {
+        fn drop(&mut self) {
+            self.write(DomSlot::at_end())
+        }
+    }
+}
+#[cfg(feature = "hydration")]
+pub use feat_hydration::SlotBulletin;
 
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 #[cfg(test)]
