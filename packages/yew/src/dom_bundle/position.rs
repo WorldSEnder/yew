@@ -71,8 +71,16 @@ impl Link {
     }
 }
 
+const RESERVED_TRAP_SLOT: usize = 0;
 thread_local! {
-    static DYNAMIC_SLOTS: RefCell<slab::Slab<Link>> = const { RefCell::new(Slab::new()) };
+    static DYNAMIC_SLOTS: RefCell<slab::Slab<Link>> = {
+        let mut slots = Slab::new();
+        let mut fake_trap_link = Link::new(DomSlot::at_end());
+        fake_trap_link.add_ref(); // ensure this is never collected
+        fake_trap_link.dec_owner(); // has no owner though, so never written to
+        assert_eq!(slots.insert(fake_trap_link), RESERVED_TRAP_SLOT);
+        RefCell::new(slots)
+    };
 }
 
 type LinkId = usize; // Dictated by slab
@@ -87,7 +95,10 @@ pub(crate) struct DynamicDomSlot {
 
 impl std::fmt::Debug for DynamicDomSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "#{}", self.link)
+        DYNAMIC_SLOTS.with(|slots| match slots.try_borrow() {
+            Ok(slots) => write!(f, "<{:?}>", slots[self.link].parent),
+            Err(_) => write!(f, "#{}", self.link),
+        })
     }
 }
 
@@ -100,35 +111,30 @@ struct DynamicDomSlotHandle {
 
 mod trap_impl {
     use super::Node;
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "hydration"))]
     thread_local! {
         // A special marker element that should not be referenced
-        static TRAP: Node = gloo::utils::document().create_element("div").unwrap().into();
+        static TRAP: Node = {
+            use super::{DYNAMIC_SLOTS, DomSlot, RESERVED_TRAP_SLOT};
+            let node: Node = gloo::utils::document().create_element("div").unwrap().into();
+            DYNAMIC_SLOTS.with_borrow_mut(|slots| slots[RESERVED_TRAP_SLOT].parent = DomSlot::at(node.clone()));
+            node
+        };
     }
-    /// Get a "trap" node, or None if compiled without debug_assertions
-    #[cfg(feature = "hydration")]
-    pub fn get_trap_node() -> Option<Node> {
-        #[cfg(debug_assertions)]
+    #[inline]
+    pub fn with_trap_ref<R>(f: impl FnOnce(Option<&Node>) -> R) -> R {
+        #[cfg(all(debug_assertions, feature = "hydration"))]
         {
-            TRAP.with(|trap| Some(trap.clone()))
+            TRAP.with(|trap| f(Some(trap)))
         }
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(all(debug_assertions, feature = "hydration")))]
         {
-            None
+            f(None)
         }
     }
     #[inline]
     pub fn is_trap(node: &Node) -> bool {
-        #[cfg(debug_assertions)]
-        {
-            TRAP.with(|trap| node == trap)
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            // When not running with debug_assertions, there is no trap node
-            let _ = node;
-            false
-        }
+        with_trap_ref(|trap| trap == Some(node))
     }
 }
 
@@ -147,13 +153,6 @@ impl DomSlot {
         Self {
             variant: DomSlotVariant::Node(next_sibling),
         }
-    }
-
-    /// A new "placeholder" [DomSlot] that should not be used to insert nodes
-    #[inline]
-    #[cfg(feature = "hydration")]
-    pub fn new_debug_trapped() -> Self {
-        Self::create(trap_impl::get_trap_node())
     }
 
     /// Get the [Node] that comes just after the position, or `None` if this denotes the position at
@@ -211,7 +210,7 @@ impl DynamicDomSlot {
     pub fn new(initial_position: DomSlot) -> Self {
         let link = DYNAMIC_SLOTS.with_borrow_mut(|slots| {
             if let DomSlotVariant::Chained(parent) = &initial_position.variant {
-                slots.get_mut(parent.link).unwrap().add_ref();
+                slots[parent.link].add_ref();
             }
             slots.insert(Link::new(initial_position))
         });
@@ -219,19 +218,6 @@ impl DynamicDomSlot {
             link,
             _phantom: PhantomData,
         }
-    }
-
-    #[cfg(feature = "hydration")]
-    pub fn new_debug_trapped() -> Self {
-        Self::new(DomSlot::new_debug_trapped())
-    }
-
-    /// Move out of self, leaving behind a trapped slot. `self` should not be used afterwards.
-    /// Used during the transition from a hydrating to a rendered component to move state between
-    /// enum variants.
-    #[cfg(feature = "hydration")]
-    pub fn take(&mut self) -> Self {
-        std::mem::replace(self, Self::new(DomSlot::new_debug_trapped()))
     }
 
     /// Change the [`DomSlot`] that is targeted. Subsequently, this will behave as if `self` was
@@ -261,14 +247,22 @@ impl DynamicDomSlot {
     }
 }
 
-fn remove_link(slots: &mut Slab<Link>, link: LinkId) {
+fn remove_link(slots: &mut Slab<Link>, link: LinkId, owner: bool) {
+    let was_last = if owner {
+        slots[link].dec_owner()
+    } else {
+        slots[link].dec_ref()
+    };
+    if !was_last {
+        return;
+    }
     let mut link = link;
     loop {
         let removed = slots.remove(link);
         let DomSlotVariant::Chained(handle) = removed.parent.variant else {
             break;
         };
-        if !slots.get_mut(handle.link).unwrap().dec_ref() {
+        if !slots[handle.link].dec_ref() {
             break;
         }
         link = handle.link;
@@ -283,9 +277,7 @@ fn remove_link(slots: &mut Slab<Link>, link: LinkId) {
 impl Drop for DynamicDomSlot {
     fn drop(&mut self) {
         DYNAMIC_SLOTS.with_borrow_mut(|slots| {
-            if slots.get_mut(self.link).unwrap().dec_owner() {
-                remove_link(slots, self.link);
-            }
+            remove_link(slots, self.link, true);
         });
     }
 }
@@ -295,28 +287,24 @@ impl DynamicDomSlotHandle {
     fn reassign_unchecked(&self, next_position: DomSlot) {
         // TODO: is not defensive against accidental reference loops
         DYNAMIC_SLOTS.with_borrow_mut(|slots| {
-            let old_parent = slots.get_mut(self.link).unwrap().parent.clone();
+            let old_parent = slots[self.link].parent.clone();
             match (&old_parent.variant, &next_position.variant) {
                 (DomSlotVariant::Node(_), DomSlotVariant::Node(_)) => {}
                 (DomSlotVariant::Node(_), DomSlotVariant::Chained(new_parent)) => {
-                    slots.get_mut(new_parent.link).unwrap().add_ref();
+                    slots[new_parent.link].add_ref();
                 }
                 (DomSlotVariant::Chained(old_parent), DomSlotVariant::Node(_)) => {
-                    if slots.get_mut(old_parent.link).unwrap().dec_ref() {
-                        remove_link(slots, old_parent.link);
-                    }
+                    remove_link(slots, old_parent.link, false);
                 }
                 (DomSlotVariant::Chained(old_parent), DomSlotVariant::Chained(new_parent)) => {
                     if old_parent.link == new_parent.link {
                         return;
                     }
-                    slots.get_mut(new_parent.link).unwrap().add_ref();
-                    if slots.get_mut(old_parent.link).unwrap().dec_ref() {
-                        remove_link(slots, old_parent.link);
-                    }
+                    slots[new_parent.link].add_ref();
+                    remove_link(slots, old_parent.link, false);
                 }
             }
-            slots.get_mut(self.link).unwrap().parent = next_position;
+            slots[self.link].parent = next_position;
         });
     }
 
@@ -326,7 +314,7 @@ impl DynamicDomSlotHandle {
         let node = DYNAMIC_SLOTS.with_borrow(|slots| {
             let mut link = self.link;
             loop {
-                match &slots.get(link).unwrap().parent.variant {
+                match &slots[link].parent.variant {
                     // NOTE: We clone to drop the borrow and let f re-enter this method
                     DomSlotVariant::Node(node) => break node.clone(),
                     DomSlotVariant::Chained(handle) => link = handle.link,
@@ -343,7 +331,30 @@ mod feat_hydration {
 
     use web_sys::Node;
 
-    use super::{DomSlot, DynamicDomSlot, DynamicDomSlotHandle};
+    use super::{
+        DomSlot, DomSlotVariant, DynamicDomSlot, DynamicDomSlotHandle, RESERVED_TRAP_SLOT,
+    };
+
+    impl DynamicDomSlot {
+        pub fn new_debug_trapped() -> Self {
+            // make sure the trap is initialized before we return
+            let _ = super::trap_impl::with_trap_ref(|_| ());
+            let trap_handle = DomSlot {
+                variant: DomSlotVariant::Chained(DynamicDomSlotHandle {
+                    link: RESERVED_TRAP_SLOT,
+                    _phantom: PhantomData,
+                }),
+            };
+            Self::new(trap_handle)
+        }
+
+        /// Move out of self, leaving behind a trapped slot. `self` should not be used afterwards.
+        /// Used during the transition from a hydrating to a rendered component to move state
+        /// between enum variants.
+        pub fn take(&mut self) -> Self {
+            std::mem::replace(self, Self::new_debug_trapped())
+        }
+    }
 
     pub struct SlotBulletin<'tree> {
         prev_next_sibling: Option<DynamicDomSlotHandle>,
@@ -471,7 +482,7 @@ mod layout_tests {
     fn debug_printing() {
         // basic tests that these don't panic. We don't enforce any specific format.
         println!("At end: {:?}", DomSlot::at_end());
-        println!("Trapped: {:?}", DomSlot::new_debug_trapped());
+        println!("Trapped: {:?}", DynamicDomSlot::new_debug_trapped());
         println!(
             "At element: {:?}",
             DomSlot::at(document().create_element("p").unwrap().into())
