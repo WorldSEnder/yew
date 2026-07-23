@@ -228,7 +228,7 @@ impl DynamicDomSlotHandle {
     fn with_next_sibling<R>(&self, f: impl FnOnce(Option<&Node>) -> R) -> R {
         // We use an iterative approach to traverse a possible long chain of references.
         // See issue #3043 for why a recursive call is impossible for large lists in vdom.
-        let node = LINK_FOREST.with_borrow(|forest| forest.find_root(self.link).clone());
+        let node = LINK_FOREST.with_borrow_mut(|forest| forest.find_root(self.link).clone());
         f(node.as_ref())
     }
 }
