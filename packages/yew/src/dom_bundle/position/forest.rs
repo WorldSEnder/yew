@@ -45,15 +45,15 @@ impl LinkForest {
     }
 
     fn node(&self, link: LinkId) -> &Link {
-        &self.nodes[link as usize]
+        &self.nodes[link]
     }
 
     fn node_mut(&mut self, link: LinkId) -> &mut Link {
-        &mut self.nodes[link as usize]
+        &mut self.nodes[link]
     }
 
     fn remove_node(&mut self, link: LinkId) -> Link {
-        self.nodes.remove(link as usize)
+        self.nodes.remove(link)
     }
 
     pub fn remove(&mut self, link: LinkId) {
