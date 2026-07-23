@@ -3,7 +3,6 @@
 use std::cell::RefCell;
 use std::marker::PhantomData;
 
-use slab::Slab;
 use web_sys::{Element, Node};
 
 type PhantomNotSendNorSync = PhantomData<*const u8>;
@@ -36,56 +35,27 @@ enum DomSlotVariant {
     Chained(DynamicDomSlotHandle),
 }
 
-struct Link {
-    parent: DomSlot,
-    /// counts the owner + the number of links in DYNAMIC_SLOTS that refer to this link
-    /// does NOT count the number of handles
-    ref_count: usize,
-    has_owner: bool,
-}
+mod forest;
+use forest::{LinkForest, LinkId};
 
-impl Link {
-    fn new(parent: DomSlot) -> Self {
-        Self {
-            parent,
-            ref_count: 1,
-            has_owner: true,
-        }
-    }
-
-    fn dec_ref(&mut self, owner: bool) -> bool {
-        if owner {
-            debug_assert!(self.has_owner, "must have an owner");
-            self.has_owner = false;
-        }
-        debug_assert!(self.ref_count > 0, "must have refs");
-        self.ref_count -= 1;
-        self.ref_count == 0
-    }
-
-    fn add_ref(&mut self) {
-        debug_assert!(self.ref_count > 0, "no revives");
-        self.ref_count += 1;
-    }
-}
-
-const RESERVED_TRAP_SLOT: usize = 0;
+// This handle is only valid when trap nodes are active
+const RESERVED_TRAP_HANDLE: DynamicDomSlotHandle = DynamicDomSlotHandle {
+    link: 0,
+    _phantom: PhantomData,
+};
 thread_local! {
-    static DYNAMIC_SLOTS: RefCell<slab::Slab<Link>> = {
-        let mut slots = Slab::new();
+    static LINK_FOREST: RefCell<LinkForest> = {
+        let mut slots = LinkForest::default();
         trap_impl::with_trap_ref(|trap| {
             if let Some(trap) = trap {
-                let mut fake_trap_link = Link::new(DomSlot::at(trap.clone()));
-                fake_trap_link.add_ref();     // ensure this is never collected
-                fake_trap_link.dec_ref(true); // has no owner though, so never written to
-                assert_eq!(slots.insert(fake_trap_link), RESERVED_TRAP_SLOT);
+                let trap_link = slots.insert(DomSlot::at(trap.clone()));
+                assert_eq!(trap_link, RESERVED_TRAP_HANDLE.link);
+                slots.leak(trap_link);
             }
         });
         RefCell::new(slots)
     };
 }
-
-type LinkId = usize; // Dictated by slab
 
 /// A dynamic dom slot can be reassigned. This change is also seen by the [`DomSlot`] from
 /// [`Self::to_position`] before the reassignment took place.
@@ -97,10 +67,7 @@ pub(crate) struct DynamicDomSlot {
 
 impl std::fmt::Debug for DynamicDomSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        DYNAMIC_SLOTS.with(|slots| match slots.try_borrow() {
-            Ok(slots) => write!(f, "<{:?}>", slots[self.link].parent),
-            Err(_) => write!(f, "#{}", self.link),
-        })
+        write!(f, "#{} -> {:?}", self.link, self.to_position())
     }
 }
 
@@ -205,12 +172,7 @@ impl DynamicDomSlot {
     /// Create a dynamic dom slot that initially represents ("targets") the same slot as the
     /// argument.
     pub fn new(initial_position: DomSlot) -> Self {
-        let link = DYNAMIC_SLOTS.with_borrow_mut(|slots| {
-            if let DomSlotVariant::Chained(parent) = &initial_position.variant {
-                slots[parent.link].add_ref();
-            }
-            slots.insert(Link::new(initial_position))
-        });
+        let link = LINK_FOREST.with_borrow_mut(|slots| slots.insert(initial_position));
         Self {
             link,
             _phantom: PhantomData,
@@ -220,13 +182,13 @@ impl DynamicDomSlot {
     /// Change the [`DomSlot`] that is targeted. Subsequently, this will behave as if `self` was
     /// created from the passed DomSlot in the first place.
     pub fn reassign(&self, next_position: DomSlot) {
-        self.clone_to_follower().reassign_unchecked(next_position);
+        self.clone_to_handle().reassign_unchecked(next_position);
     }
 
     /// Get a [`DomSlot`] that gets automatically updated when `self` gets reassigned. All such
     /// slots are equivalent to each other and point to the same position.
     pub fn to_position(&self) -> DomSlot {
-        self.clone_to_follower().into_position()
+        self.clone_to_handle().into_position()
     }
 
     /// There can only be one owner of a dynamic dom slot. Reassigning a dom slot is only allowed
@@ -234,7 +196,7 @@ impl DynamicDomSlot {
     /// and should only read the value, but never write to it.
     /// This does not imply that access is always serialized! Followers are allowed to write at any
     /// point without prior synchronization, as long as they ensure that the owner is still alive.
-    fn clone_to_follower(&self) -> DynamicDomSlotHandle {
+    fn clone_to_handle(&self) -> DynamicDomSlotHandle {
         DynamicDomSlotHandle {
             link: self.link,
             _phantom: self._phantom,
@@ -242,39 +204,9 @@ impl DynamicDomSlot {
     }
 }
 
-fn remove_link(slots: &mut Slab<Link>, link: LinkId, owner: bool) {
-    if !slots[link].dec_ref(owner) {
-        return;
-    }
-    let mut link = link;
-    loop {
-        let removed = slots.remove(link);
-        let DomSlotVariant::Chained(handle) = removed.parent.variant else {
-            break;
-        };
-        if !slots[handle.link].dec_ref(false) {
-            break;
-        }
-        link = handle.link;
-    }
-    // from time to time, clean up memory in the slab
-    // TODO: this needs more analysis under amortized runtime costs and a clever potential
-    // definition. shrink_to_fit will first check if there are any vacant slots at "the end". If
-    // there are, it will then do a full pass over empty and filled slots. The problem is that
-    // "the end" is not easily available from the public API. We know it's somewhere between
-    // len() and capacity(), and also past the link(s) we just removed. But we can't check the
-    // internal entries.len().
-    const ALLOWED_SLACK: usize = 1024 * 1024 * 1024 / size_of::<Link>();
-    if slots.capacity() / 4 > slots.len() && slots.capacity() - slots.len() > ALLOWED_SLACK {
-        slots.shrink_to_fit();
-    }
-}
-
 impl Drop for DynamicDomSlot {
     fn drop(&mut self) {
-        DYNAMIC_SLOTS.with_borrow_mut(|slots| {
-            remove_link(slots, self.link, true);
-        });
+        LINK_FOREST.with_borrow_mut(|links| links.remove(self.link));
     }
 }
 
@@ -288,41 +220,15 @@ impl DynamicDomSlotHandle {
     /// Reassign through a handle. This is only valid if the owning [DynamicDomSlot] is still alive.
     fn reassign_unchecked(&self, next_position: DomSlot) {
         // TODO: is not defensive against accidental reference loops
-        DYNAMIC_SLOTS.with_borrow_mut(|slots| {
-            let old_parent = slots[self.link].parent.clone();
-            match (&old_parent.variant, &next_position.variant) {
-                (DomSlotVariant::Node(_), DomSlotVariant::Node(_)) => {}
-                (DomSlotVariant::Node(_), DomSlotVariant::Chained(new_parent)) => {
-                    slots[new_parent.link].add_ref();
-                }
-                (DomSlotVariant::Chained(old_parent), DomSlotVariant::Node(_)) => {
-                    remove_link(slots, old_parent.link, false);
-                }
-                (DomSlotVariant::Chained(old_parent), DomSlotVariant::Chained(new_parent)) => {
-                    if old_parent.link == new_parent.link {
-                        return;
-                    }
-                    slots[new_parent.link].add_ref();
-                    remove_link(slots, old_parent.link, false);
-                }
-            }
-            slots[self.link].parent = next_position;
+        LINK_FOREST.with_borrow_mut(|forest| {
+            forest.reassign(self.link, next_position);
         });
     }
 
     fn with_next_sibling<R>(&self, f: impl FnOnce(Option<&Node>) -> R) -> R {
         // We use an iterative approach to traverse a possible long chain of references.
         // See issue #3043 for why a recursive call is impossible for large lists in vdom.
-        let node = DYNAMIC_SLOTS.with_borrow(|slots| {
-            let mut link = self.link;
-            loop {
-                match &slots[link].parent.variant {
-                    // NOTE: We clone to drop the borrow and let f re-enter this method
-                    DomSlotVariant::Node(node) => break node.clone(),
-                    DomSlotVariant::Chained(handle) => link = handle.link,
-                }
-            }
-        });
+        let node = LINK_FOREST.with_borrow(|forest| forest.find_root(self.link).clone());
         f(node.as_ref())
     }
 }
@@ -333,18 +239,11 @@ mod feat_hydration {
 
     use web_sys::Node;
 
-    use super::{DomSlot, DynamicDomSlot, DynamicDomSlotHandle, RESERVED_TRAP_SLOT};
+    use super::{DomSlot, DynamicDomSlot, DynamicDomSlotHandle, RESERVED_TRAP_HANDLE};
 
     fn trapped_position() -> DomSlot {
         super::trap_impl::with_trap_ref(|trap| match trap {
-            Some(_) => {
-                // this handle exists only if we have a trap node
-                let fake_handle = DynamicDomSlotHandle {
-                    link: RESERVED_TRAP_SLOT,
-                    _phantom: PhantomData,
-                };
-                fake_handle.into_position()
-            }
+            Some(_) => RESERVED_TRAP_HANDLE.into_position(),
             None => DomSlot::at_end(),
         })
     }
@@ -370,7 +269,7 @@ mod feat_hydration {
         pub fn start(slot: &'tree mut DynamicDomSlot) -> Self {
             // We take a follower, but we are sure the owner is alive
             Self {
-                prev_next_sibling: Some(slot.clone_to_follower()),
+                prev_next_sibling: Some(slot.clone_to_handle()),
                 _owner: PhantomData,
             }
         }
@@ -398,7 +297,7 @@ mod feat_hydration {
         // its component state
         pub fn write_at_comp(&mut self, slot: DomSlot, inner_next_sibling: &DynamicDomSlot) {
             self.write(slot);
-            self.prev_next_sibling = Some(inner_next_sibling.clone_to_follower());
+            self.prev_next_sibling = Some(inner_next_sibling.clone_to_handle());
         }
     }
     impl Drop for SlotBulletin<'_> {
