@@ -1,12 +1,55 @@
+use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
 use slab::Slab;
 
-use super::{DomSlot, DomSlotVariant, Node};
+use super::{DomSlotVariant, Node};
+
+type PhantomNotSendNorSync = PhantomData<*const u8>;
 
 #[derive(Default)]
 pub struct LinkForest {
     nodes: Slab<Link>,
+}
+
+thread_local! {
+    static LINK_FOREST: RefCell<LinkForest> = {
+        RefCell::new(LinkForest::default())
+    };
+}
+
+pub fn with_forest<R>(f: impl FnOnce(&mut LinkForest) -> R) -> R {
+    LINK_FOREST.with_borrow_mut(f)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct LinkOwner {
+    id: LinkId,
+    // The link is tied to this specific thread and can't be accessed elsewhere
+    _phantom: PhantomNotSendNorSync,
+}
+
+impl LinkOwner {
+    pub fn handle(&self) -> LinkHandle {
+        LinkHandle::from_raw(self.id)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct LinkHandle {
+    id: LinkId,
+    // The link is tied to this specific thread and can't be accessed elsewhere
+    _phantom: PhantomNotSendNorSync,
+}
+
+impl LinkHandle {
+    pub const fn from_raw(id: LinkId) -> Self {
+        Self {
+            id,
+            _phantom: PhantomData,
+        }
+    }
 }
 
 #[allow(unused)]
@@ -36,7 +79,7 @@ impl LinkForest {
         }
     }
 
-    pub fn insert(&mut self, link: DomSlot) -> LinkId {
+    pub fn insert(&mut self, link: DomSlotVariant) -> LinkOwner {
         let entry = self.nodes.vacant_entry();
         let link_id = entry.key();
         let (link, parent) = Link::new(link, link_id);
@@ -44,7 +87,10 @@ impl LinkForest {
         if let Some(parent) = parent {
             self.node_mut(parent).add_ref();
         }
-        link_id
+        LinkOwner {
+            id: link_id,
+            _phantom: PhantomData,
+        }
     }
 
     fn node(&self, link: LinkId) -> LinkRef<&Link> {
@@ -59,12 +105,8 @@ impl LinkForest {
         LinkRef::new(link, self.nodes.remove(link))
     }
 
-    pub fn remove(&mut self, link: LinkId) {
-        self.remove_link(link, true);
-    }
-
-    pub fn leak(&mut self, link: LinkId) {
-        self.node_mut(link).leak();
+    pub fn remove(&mut self, link: &mut LinkOwner) {
+        self.remove_link(link.id, true);
     }
 
     fn remove_link(&mut self, link: LinkId, owner: bool) {
@@ -110,7 +152,8 @@ impl LinkForest {
         }
     }
 
-    pub fn reassign(&mut self, link: LinkId, new_parent: DomSlot) {
+    pub fn reassign(&mut self, link: &LinkHandle, new_parent: DomSlotVariant) {
+        let link = link.id;
         // removes `link` from its represented tree and moves it to `new_parent`.
         // we also have to keep track of ref counts.
         debug_assert!(
@@ -118,8 +161,10 @@ impl LinkForest {
             "owner must be alive to reassign"
         );
         let old_parent_id = self.node(link).rep_parent();
-        let (new_parent, new_parent_id) = match new_parent.variant {
-            DomSlotVariant::Chained(link) => (LinkParent::PathParent(link.link), Some(link.link)),
+        let (new_parent, new_parent_id) = match new_parent {
+            DomSlotVariant::Chained(link) => {
+                (LinkParent::PathParent(link.link.id), Some(link.link.id))
+            }
             DomSlotVariant::Node(data) => (LinkParent::Root(data), None),
         };
         if old_parent_id == new_parent_id && old_parent_id.is_some() {
@@ -142,9 +187,9 @@ impl LinkForest {
         }
     }
 
-    pub fn find_root(&mut self, link: LinkId) -> &Option<Node> {
-        self.access(link);
-        match &self.node(link).into_inner().parent {
+    pub fn find_root(&mut self, link: &LinkHandle) -> &Option<Node> {
+        self.access(link.id);
+        match &self.node(link.id).into_inner().parent {
             LinkParent::Root(node) => node,
             _ => unreachable!("access method buggy"),
         }
@@ -220,6 +265,8 @@ impl LinkForest {
 
     // Link/cut operations
     fn access(&mut self, link: LinkId) {
+        // We use an iterative approach to traverse a possible long chain of references.
+        // See issue #3043 for why a recursive call is impossible for large lists in vdom.
         // Also does not change any refcounts
         let (mut curr, mut prev) = (link, None);
         loop {
@@ -377,11 +424,11 @@ impl<L: AsMut<Link>> LinkRef<L> {
 }
 
 impl Link {
-    pub fn new(parent: DomSlot, this: LinkId) -> (Self, Option<LinkId>) {
-        let (parent, link) = match parent.variant {
+    pub fn new(parent: DomSlotVariant, this: LinkId) -> (Self, Option<LinkId>) {
+        let (parent, link) = match parent {
             DomSlotVariant::Node(node) => (LinkParent::Root(node), None),
             DomSlotVariant::Chained(handle) => {
-                (LinkParent::PathParent(handle.link), Some(handle.link))
+                (LinkParent::PathParent(handle.link.id), Some(handle.link.id))
             }
         };
         let this = Self {
@@ -392,11 +439,6 @@ impl Link {
             ref_count: 1,
         };
         (this, link)
-    }
-
-    fn leak(&mut self) {
-        self.add_ref();
-        self.dec_ref(true);
     }
 
     fn has_owner(&self) -> bool {
@@ -413,5 +455,23 @@ impl Link {
     fn add_ref(&mut self) {
         debug_assert!(self.ref_count > 0, "no revives");
         self.ref_count += 2;
+    }
+}
+
+#[cfg(feature = "hydration")]
+mod feat_hydration {
+    use super::*;
+
+    impl LinkForest {
+        pub fn leak(&mut self, link: LinkOwner) -> LinkHandle {
+            self.node_mut(link.id).leak();
+            LinkHandle::from_raw(link.id)
+        }
+    }
+    impl Link {
+        fn leak(&mut self) {
+            self.add_ref();
+            self.dec_ref(true);
+        }
     }
 }

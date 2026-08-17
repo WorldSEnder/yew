@@ -1,11 +1,6 @@
 //! Structs for keeping track where in the DOM a node belongs
 
-use std::cell::RefCell;
-use std::marker::PhantomData;
-
 use web_sys::{Element, Node};
-
-type PhantomNotSendNorSync = PhantomData<*const u8>;
 
 /// A position in the list of children of an implicit parent [`Element`].
 ///
@@ -14,6 +9,12 @@ type PhantomNotSendNorSync = PhantomData<*const u8>;
 #[derive(Clone)]
 pub(crate) struct DomSlot {
     variant: DomSlotVariant,
+}
+
+#[derive(Clone)]
+enum DomSlotVariant {
+    Node(Option<Node>),
+    Chained(DynamicDomSlotHandle),
 }
 
 impl std::fmt::Debug for DomSlot {
@@ -29,72 +30,58 @@ impl std::fmt::Debug for DomSlot {
     }
 }
 
-#[derive(Clone)]
-enum DomSlotVariant {
-    Node(Option<Node>),
-    Chained(DynamicDomSlotHandle),
-}
-
 mod forest;
-use forest::{LinkForest, LinkId};
-
-// This handle is only valid when trap nodes are active
-const RESERVED_TRAP_HANDLE: DynamicDomSlotHandle = DynamicDomSlotHandle {
-    link: 0,
-    _phantom: PhantomData,
-};
-thread_local! {
-    static LINK_FOREST: RefCell<LinkForest> = {
-        let mut slots = LinkForest::default();
-        trap_impl::with_trap_ref(|trap| {
-            if let Some(trap) = trap {
-                let trap_link = slots.insert(DomSlot::at(trap.clone()));
-                assert_eq!(trap_link, RESERVED_TRAP_HANDLE.link);
-                slots.leak(trap_link);
-            }
-        });
-        RefCell::new(slots)
-    };
-}
+use forest::{LinkHandle, LinkOwner, with_forest};
 
 /// A dynamic dom slot can be reassigned. This change is also seen by the [`DomSlot`] from
 /// [`Self::to_position`] before the reassignment took place.
 pub(crate) struct DynamicDomSlot {
-    link: LinkId,
-    // The link is tied to this specific thread and can't be accessed elsewhere
-    _phantom: PhantomNotSendNorSync,
+    link: LinkOwner,
 }
 
 impl std::fmt::Debug for DynamicDomSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "#{} -> {:?}", self.link, self.to_position())
+        write!(f, "#{:?} -> {:?}", self.link, self.to_position())
     }
 }
 
 #[derive(Clone)]
 struct DynamicDomSlotHandle {
-    link: LinkId,
-    // The link is tied to this specific thread and can't be accessed elsewhere
-    _phantom: PhantomNotSendNorSync,
+    link: LinkHandle,
 }
 
 mod trap_impl {
-    use super::Node;
+    use std::cell::OnceCell;
+
+    use super::{LinkHandle, Node};
+
+    pub struct TrapContext {
+        // A special marker element that should not be referenced
+        pub trap: Node,
+        #[allow(unused)]
+        pub handle: OnceCell<LinkHandle>,
+    }
     #[cfg(all(debug_assertions, feature = "hydration"))]
     thread_local! {
-        // A special marker element that should not be referenced
-        static TRAP: Node = gloo::utils::document().create_element("div").unwrap().into();
+        static CTX: TrapContext = TrapContext {
+            trap: gloo::utils::document().create_element("div").unwrap().into(),
+            handle: OnceCell::new(),
+        };
     }
     #[inline]
-    pub fn with_trap_ref<R>(f: impl FnOnce(Option<&Node>) -> R) -> R {
+    pub fn with_trap_ctx<R>(f: impl FnOnce(Option<&TrapContext>) -> R) -> R {
         #[cfg(all(debug_assertions, feature = "hydration"))]
         {
-            TRAP.with(|trap| f(Some(trap)))
+            CTX.with(|ctx| f(Some(ctx)))
         }
         #[cfg(not(all(debug_assertions, feature = "hydration")))]
         {
             f(None)
         }
+    }
+    #[inline]
+    pub fn with_trap_ref<R>(f: impl FnOnce(Option<&Node>) -> R) -> R {
+        with_trap_ctx(|ctx| f(ctx.map(|ctx| &ctx.trap)))
     }
     #[inline]
     pub fn is_trap(node: &Node) -> bool {
@@ -172,11 +159,8 @@ impl DynamicDomSlot {
     /// Create a dynamic dom slot that initially represents ("targets") the same slot as the
     /// argument.
     pub fn new(initial_position: DomSlot) -> Self {
-        let link = LINK_FOREST.with_borrow_mut(|slots| slots.insert(initial_position));
-        Self {
-            link,
-            _phantom: PhantomData,
-        }
+        let link = with_forest(|slots| slots.insert(initial_position.variant));
+        Self { link }
     }
 
     /// Change the [`DomSlot`] that is targeted. Subsequently, this will behave as if `self` was
@@ -198,15 +182,14 @@ impl DynamicDomSlot {
     /// point without prior synchronization, as long as they ensure that the owner is still alive.
     fn clone_to_handle(&self) -> DynamicDomSlotHandle {
         DynamicDomSlotHandle {
-            link: self.link,
-            _phantom: self._phantom,
+            link: self.link.handle(),
         }
     }
 }
 
 impl Drop for DynamicDomSlot {
     fn drop(&mut self) {
-        LINK_FOREST.with_borrow_mut(|links| links.remove(self.link));
+        with_forest(|links| links.remove(&mut self.link));
     }
 }
 
@@ -220,15 +203,13 @@ impl DynamicDomSlotHandle {
     /// Reassign through a handle. This is only valid if the owning [DynamicDomSlot] is still alive.
     fn reassign_unchecked(&self, next_position: DomSlot) {
         // TODO: is not defensive against accidental reference loops
-        LINK_FOREST.with_borrow_mut(|forest| {
-            forest.reassign(self.link, next_position);
+        with_forest(|forest| {
+            forest.reassign(&self.link, next_position.variant);
         });
     }
 
     fn with_next_sibling<R>(&self, f: impl FnOnce(Option<&Node>) -> R) -> R {
-        // We use an iterative approach to traverse a possible long chain of references.
-        // See issue #3043 for why a recursive call is impossible for large lists in vdom.
-        let node = LINK_FOREST.with_borrow_mut(|forest| forest.find_root(self.link).clone());
+        let node = with_forest(|forest| forest.find_root(&self.link).clone());
         f(node.as_ref())
     }
 }
@@ -239,11 +220,29 @@ mod feat_hydration {
 
     use web_sys::Node;
 
-    use super::{DomSlot, DynamicDomSlot, DynamicDomSlotHandle, RESERVED_TRAP_HANDLE};
+    use super::{DomSlot, DynamicDomSlot, DynamicDomSlotHandle, with_forest};
+
+    #[inline]
+    fn with_trap_handle<R>(f: impl FnOnce(Option<DynamicDomSlotHandle>) -> R) -> R {
+        super::trap_impl::with_trap_ctx(|ctx| {
+            let handle = ctx.map(|ctx| {
+                let trap_link = ctx.handle.get_or_init(|| {
+                    with_forest(|forest| {
+                        let trap_link = forest.insert(DomSlot::at(ctx.trap.clone()).variant);
+                        forest.leak(trap_link)
+                    })
+                });
+                DynamicDomSlotHandle {
+                    link: trap_link.clone(),
+                }
+            });
+            f(handle)
+        })
+    }
 
     fn trapped_position() -> DomSlot {
-        super::trap_impl::with_trap_ref(|trap| match trap {
-            Some(_) => RESERVED_TRAP_HANDLE.into_position(),
+        with_trap_handle(|handle| match handle {
+            Some(handle) => handle.into_position(),
             None => DomSlot::at_end(),
         })
     }
