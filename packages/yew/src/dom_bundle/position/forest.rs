@@ -1,17 +1,16 @@
-use std::cell::RefCell;
+use std::cell::{self, RefCell};
+use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-
-use slab::Slab;
+use std::rc::Rc;
 
 use super::{DomSlotVariant, Node};
 
 type PhantomNotSendNorSync = PhantomData<*const u8>;
 
+/// A dummy struct that serves as a marker for the borrow of [`LINK_FOREST`].
 #[derive(Default)]
-pub struct LinkForest {
-    nodes: Slab<Link>,
-}
+pub struct LinkForest;
 
 thread_local! {
     static LINK_FOREST: RefCell<LinkForest> = {
@@ -23,30 +22,81 @@ pub fn with_forest<R>(f: impl FnOnce(&mut LinkForest) -> R) -> R {
     LINK_FOREST.with_borrow_mut(f)
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone)]
+struct RawLink(
+    /// SAFETY: Comes from `Rc::into_raw`
+    *const RefCell<Link>,
+);
+
+impl RawLink {
+    fn new(link: Link) -> Self {
+        let the_rc = Rc::new(RefCell::new(link));
+        let ptr = Rc::into_raw(the_rc);
+        Self(ptr)
+    }
+
+    fn id(&self) -> usize {
+        self.0.addr()
+    }
+
+    fn inc_strong(&self) {
+        unsafe { Rc::increment_strong_count(self.0) };
+    }
+
+    fn into_rc(self) -> Rc<RefCell<Link>> {
+        unsafe { Rc::from_raw(self.0) }
+    }
+}
+
+impl PartialEq for RawLink {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::addr_eq(self.0, other.0)
+    }
+}
+
+#[derive(PartialEq)]
 pub struct LinkOwner {
-    id: LinkId,
+    id: RawLink,
     // The link is tied to this specific thread and can't be accessed elsewhere
     _phantom: PhantomNotSendNorSync,
+}
+
+impl Debug for LinkOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{:x}", self.id.id())
+    }
 }
 
 impl LinkOwner {
     pub fn handle(&self) -> LinkHandle {
-        LinkHandle::from_raw(self.id)
+        LinkHandle::from_raw(self.id.clone())
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Clone, PartialEq)]
 pub struct LinkHandle {
-    id: LinkId,
+    id: RawLink,
     // The link is tied to this specific thread and can't be accessed elsewhere
     _phantom: PhantomNotSendNorSync,
 }
+impl Debug for LinkHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#<{:x}>", self.id.id())
+    }
+}
 
 impl LinkHandle {
-    pub const fn from_raw(id: LinkId) -> Self {
+    const fn from_raw(id: RawLink) -> Self {
         Self {
             id,
+            _phantom: PhantomData,
+        }
+    }
+
+    fn to_owner(&self) -> LinkOwner {
+        self.id.inc_strong();
+        LinkOwner {
+            id: self.id.clone(),
             _phantom: PhantomData,
         }
     }
@@ -70,100 +120,91 @@ macro_rules! trace {
     }
 }
 
-impl LinkForest {
-    #[allow(unused)]
-    fn print_all(&self) {
-        for (n, node) in &self.nodes {
-            let node = LinkRef::new(n, node);
-            gloo::console::console_dbg!(node.debug());
-        }
+struct AsRefRef<'a>(cell::Ref<'a, Link>);
+impl AsRef<Link> for AsRefRef<'_> {
+    fn as_ref(&self) -> &Link {
+        &self.0
     }
+}
+struct AsRefMut<'a>(cell::RefMut<'a, Link>);
+impl AsRef<Link> for AsRefMut<'_> {
+    fn as_ref(&self) -> &Link {
+        &self.0
+    }
+}
+impl AsMut<Link> for AsRefMut<'_> {
+    fn as_mut(&mut self) -> &mut Link {
+        &mut self.0
+    }
+}
 
+impl LinkForest {
     pub fn insert(&mut self, link: DomSlotVariant) -> LinkOwner {
-        let entry = self.nodes.vacant_entry();
-        let link_id = entry.key();
-        let (link, parent) = Link::new(link, link_id);
-        entry.insert(link);
-        if let Some(parent) = parent {
-            self.node_mut(parent).add_ref();
-        }
+        let raw = RawLink::new(Link::new(link));
         LinkOwner {
-            id: link_id,
+            id: raw,
             _phantom: PhantomData,
         }
     }
 
-    fn node(&self, link: LinkId) -> LinkRef<&Link> {
-        LinkRef::new(link, &self.nodes[link])
+    fn node(&self, link: &LinkHandle) -> LinkRef<impl '_ + AsRef<Link>> {
+        let refcell = unsafe { &*link.id.0 };
+        LinkRef::new(link.id.id(), AsRefRef(refcell.borrow()))
     }
 
-    fn node_mut(&mut self, link: LinkId) -> LinkRef<&mut Link> {
-        LinkRef::new(link, &mut self.nodes[link])
+    fn node_mut(&mut self, link: &LinkHandle) -> LinkRef<impl '_ + AsRef<Link> + AsMut<Link>> {
+        let refcell = unsafe { &*link.id.0 };
+        LinkRef::new(link.id.id(), AsRefMut(refcell.borrow_mut()))
     }
 
-    fn remove_node(&mut self, link: LinkId) -> LinkRef<Link> {
-        LinkRef::new(link, self.nodes.remove(link))
+    fn remove_node(&mut self, link: &LinkOwner) -> Option<LinkRef<Link>> {
+        // TODO: this should take the owner by value, but that's incompatible with calling it
+        // inside of a Drop method without adding a new "invalid" state.
+        let id = link.id.id();
+        let owned = link.id.clone().into_rc();
+        let inner = Rc::try_unwrap(owned).ok()?.into_inner();
+        Some(LinkRef::new(id, inner))
     }
 
     pub fn remove(&mut self, link: &mut LinkOwner) {
-        self.remove_link(link.id, true);
+        self.remove_link(link);
     }
 
-    fn remove_link(&mut self, link: LinkId, owner: bool) {
-        if !self.node_mut(link).dec_ref(owner) {
-            return;
-        }
+    fn remove_link(&mut self, link: &LinkOwner) {
+        let mut slot;
         let mut n = link;
         loop {
-            let node = self.remove_node(n);
+            let Some(mut node) = self.remove_node(n) else {
+                break;
+            };
             debug_assert!(
                 node.right().is_none(),
                 "can't have children in the represented tree"
             );
-            let l = node.left();
-            let rep_p = node.rep_parent();
+            let l = node.left().cloned();
+            let rep_p = node.replace_rep_parent(None);
             let p = node.into_inner().parent;
-            if let &LinkParent::AuxParent(p) = &p {
-                debug_assert!(self.node(p).right() == Some(n));
-                self.node_mut(p).set_right(l);
+            if let LinkParent::AuxParent(p) = &p {
+                debug_assert!(self.node(p).right() == Some(&n.handle()));
+                self.node_mut(p).set_right(l.clone());
             }
             if let Some(l) = l {
-                self.node_mut(l).parent = p;
+                self.node_mut(&l).parent = p;
             }
             let Some(rep_p) = rep_p else {
                 break;
             };
-            if !self.node_mut(rep_p).dec_ref(false) {
-                break;
-            }
-            n = rep_p;
-        }
-        // from time to time, clean up memory in the slab
-        // TODO: this needs more analysis under amortized runtime costs and a clever potential
-        // definition. shrink_to_fit will first check if there are any vacant slots at "the end". If
-        // there are, it will then do a full pass over empty and filled slots. The problem is that
-        // "the end" is not easily available from the public API. We know it's somewhere between
-        // len() and capacity(), and also past the link(s) we just removed. But we can't check the
-        // internal entries.len().
-        const ALLOWED_SLACK: usize = 64 * 1024 * 1024 / size_of::<Link>();
-        let slots = &mut self.nodes;
-        if slots.capacity() / 4 > slots.len() && slots.capacity() - slots.len() > ALLOWED_SLACK {
-            slots.shrink_to_fit();
+            slot = rep_p;
+            n = &slot;
         }
     }
 
     pub fn reassign(&mut self, link: &LinkHandle, new_parent: DomSlotVariant) {
-        let link = link.id;
         // removes `link` from its represented tree and moves it to `new_parent`.
-        // we also have to keep track of ref counts.
-        debug_assert!(
-            self.node(link).has_owner(),
-            "owner must be alive to reassign"
-        );
-        let old_parent_id = self.node(link).rep_parent();
+        let old_parent_id = self.node_mut(link).rep_parent();
         let (new_parent, new_parent_id) = match new_parent {
             DomSlotVariant::Chained(link) => {
-                (LinkParent::PathParent(link.link.id), Some(link.link.id))
+                (LinkParent::PathParent(link.link.clone()), Some(link.link))
             }
             DomSlotVariant::Node(data) => (LinkParent::Root(data), None),
         };
@@ -171,26 +212,24 @@ impl LinkForest {
             // reassigned to its existing parent, no need to modify.
             return;
         }
-        if let Some(new_parent_id) = new_parent_id {
-            self.node_mut(new_parent_id).add_ref();
-        }
         self.splay(link);
-        let l = self.node(link).left();
+        let left = self.node(link).left().cloned();
         let parent = self.node_mut(link).parent.replace(new_parent);
         self.node_mut(link).set_left(None);
-        self.node_mut(link).set_rep_parent(new_parent_id);
-        if let Some(l) = l {
-            self.node_mut(l).parent = parent;
+        let new_parent_id = new_parent_id.map(|handle| handle.to_owner());
+        let old_parent_id = self.node_mut(link).replace_rep_parent(new_parent_id);
+        if let Some(l) = left {
+            self.node_mut(&l).parent = parent;
         }
         if let Some(old_parent_id) = old_parent_id {
-            self.remove_link(old_parent_id, false);
+            self.remove_link(&old_parent_id);
         }
     }
 
-    pub fn find_root(&mut self, link: &LinkHandle) -> &Option<Node> {
-        self.access(link.id);
-        match &self.node(link.id).into_inner().parent {
-            LinkParent::Root(node) => node,
+    pub fn find_root(&mut self, link: &LinkHandle) -> Option<Node> {
+        self.access(link);
+        match &self.node(link).parent {
+            LinkParent::Root(node) => node.clone(),
             _ => unreachable!("access method buggy"),
         }
     }
@@ -198,91 +237,94 @@ impl LinkForest {
     // Splay operations on the auxiliary tree
     // In fact, none of the splay operations change the refcount, since they do not modify the
     // represented tree.
-    fn splay_parent(&self, link: LinkId) -> Result<LinkId, SplayResult> {
+    fn splay_parent(&self, link: &LinkHandle) -> Result<LinkHandle, SplayResult> {
         // Due to borrow issues (fixed with polonius?) we can't borrow data here, and do that
         // in the caller with a double match :/
-        match &self.node(link).parent {
-            &LinkParent::AuxParent(parent) => Ok(parent),
-            &LinkParent::PathParent(link) => Err(SplayResult::Link(link)),
+        match &self.node(&link).parent {
+            LinkParent::AuxParent(parent) => Ok(parent.clone()),
+            LinkParent::PathParent(link) => Err(SplayResult::Link(link.clone())),
             LinkParent::Root(_) => Err(SplayResult::Root()),
         }
     }
 
-    fn rotate(&mut self, x: LinkId, p: LinkId) {
+    fn rotate(&mut self, x: &LinkHandle, p: &LinkHandle) {
         // shift the middle node `m` from `x` to `p`.
         let m;
         debug_assert!(self.node(p).right() == Some(x) || self.node(p).left() == Some(x));
         if self.node(p).left() == Some(x) {
-            m = self.node(x).right();
-            self.node_mut(x).set_right(Some(p));
-            self.node_mut(p).set_left(m);
+            m = self.node(x).right().cloned();
+            self.node_mut(x).set_right(Some(p.clone()));
+            self.node_mut(p).set_left(m.clone());
         } else {
-            m = self.node(x).left();
-            self.node_mut(x).set_left(Some(p));
-            self.node_mut(p).set_right(m);
+            m = self.node(x).left().cloned();
+            self.node_mut(x).set_left(Some(p.clone()));
+            self.node_mut(p).set_right(m.clone());
         };
         if let Some(m) = m {
-            debug_assert_eq!(self.node_mut(m).parent, LinkParent::AuxParent(x));
-            self.node_mut(m).parent = LinkParent::AuxParent(p);
+            // debug_assert_eq!(self.node_mut(m).parent, LinkParent::AuxParent(x));
+            self.node_mut(&m).parent = LinkParent::AuxParent(p.clone());
         }
         // attach `x` to the parent of `p`
-        let g = self.node_mut(p).parent.replace(LinkParent::AuxParent(x));
-        if let LinkParent::AuxParent(g) = g {
+        let g = self
+            .node_mut(p)
+            .parent
+            .replace(LinkParent::AuxParent(x.clone()));
+        if let LinkParent::AuxParent(g) = &g {
             let mut g = self.node_mut(g);
             debug_assert!(g.right() == Some(p) || g.left() == Some(p));
             if g.left() == Some(p) {
-                g.set_left(Some(x));
+                g.set_left(Some(x.clone()));
             } else {
-                g.set_right(Some(x));
+                g.set_right(Some(x.clone()));
             }
         }
         self.node_mut(x).parent = g;
     }
 
-    fn splay(&mut self, link: LinkId) -> SplayResult {
+    fn splay(&mut self, link: &LinkHandle) -> SplayResult {
         let x = link;
         loop {
             let mut p = match self.splay_parent(x) {
                 Ok(p) => p,
                 Err(done) => return done,
             };
-            if let Ok(g) = self.splay_parent(p) {
+            if let Ok(g) = self.splay_parent(&p) {
                 // check for zig-zig or zig-zag
                 // zig-zig can be implemented by first rotating p and g, followed by x and p
                 // zig-zag can be implemented by first rotating x and p, followed by x and g
-                let x_is_left = self.node(p).left() == Some(x);
-                let p_is_left = self.node(g).left() == Some(p);
+                let x_is_left = self.node(&p).left() == Some(x);
+                let p_is_left = self.node(&g).left() == Some(&p);
                 if x_is_left == p_is_left {
-                    self.rotate(p, g);
+                    self.rotate(&p, &g);
                 } else {
-                    self.rotate(x, p);
+                    self.rotate(x, &p);
                     p = g;
                 }
             }
-            self.rotate(x, p);
+            self.rotate(x, &p);
         }
     }
 
     // Link/cut operations
-    fn access(&mut self, link: LinkId) {
+    fn access(&mut self, link: &LinkHandle) {
         // We use an iterative approach to traverse a possible long chain of references.
         // See issue #3043 for why a recursive call is impossible for large lists in vdom.
         // Also does not change any refcounts
-        let (mut curr, mut prev) = (link, None);
+        let (mut curr, mut prev) = (link.clone(), None);
         loop {
-            let link = self.splay(curr);
+            let link = self.splay(&curr);
             // found a path-parent pointer. now we cut this one
-            let d = self.node_mut(curr).right();
-            if let Some(prev) = prev {
-                debug_assert_eq!(self.node(prev).parent, LinkParent::PathParent(curr));
-                self.node_mut(prev).parent = LinkParent::AuxParent(curr);
+            let d = self.node_mut(&curr).right().cloned();
+            if let Some(ref prev) = prev {
+                // debug_assert_eq!(self.node(prev).parent, LinkParent::PathParent(curr));
+                self.node_mut(prev).parent = LinkParent::AuxParent(curr.clone());
                 // small deviation from the original paper: we do not remove the tail
                 // of the preferred path the first node is already on.
                 // this would originally run unconditionally of prev.is_some()
-                self.node_mut(curr).set_right(Some(prev));
+                self.node_mut(&curr).set_right(Some(prev.clone()));
                 if let Some(d) = d {
-                    debug_assert_eq!(self.node(d).parent, LinkParent::AuxParent(curr));
-                    self.node_mut(d).parent = LinkParent::PathParent(curr);
+                    // debug_assert_eq!(self.node(d).parent, LinkParent::AuxParent(curr));
+                    self.node_mut(&d).parent = LinkParent::PathParent(curr.clone());
                 }
             }
             let SplayResult::Link(link) = link else { break };
@@ -294,22 +336,20 @@ impl LinkForest {
     }
 }
 
-pub type LinkId = usize;
-
 enum SplayResult {
-    Link(LinkId),
+    Link(LinkHandle),
     Root(
         // &'a Option<Node>
     ),
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(Debug)]
 enum LinkParent {
     Root(Option<Node>),
     // parent is on the same preferred path
-    AuxParent(LinkId),
+    AuxParent(LinkHandle),
     // "path-parent pointer" to some other preferred path
-    PathParent(LinkId),
+    PathParent(LinkHandle),
 }
 
 impl LinkParent {
@@ -320,14 +360,9 @@ impl LinkParent {
 
 struct Link {
     parent: LinkParent,
-    // We use a link's own id to signal that it has no right/left child or represented parent
-    left_aux: LinkId,
-    right_aux: LinkId,
-    rep_parent: LinkId,
-    /// counts the owner + the number of links in LINK_FOREST that refer to this link.
-    /// to save a bit, the owner is counted in the lowest bit, handles are counted in the upper
-    /// bits
-    ref_count: usize,
+    left_aux: Option<LinkHandle>,
+    right_aux: Option<LinkHandle>,
+    rep_parent: Option<LinkOwner>,
 }
 
 impl AsRef<Link> for Link {
@@ -343,7 +378,7 @@ impl AsMut<Link> for Link {
 }
 
 struct LinkRef<L> {
-    id: LinkId,
+    id: usize,
     link: L,
 }
 
@@ -362,7 +397,7 @@ impl<L: AsRef<Link> + AsMut<Link>> DerefMut for LinkRef<L> {
 }
 
 impl<L> LinkRef<L> {
-    fn new(id: LinkId, link: L) -> Self {
+    fn new(id: usize, link: L) -> Self {
         Self { id, link }
     }
 
@@ -372,89 +407,71 @@ impl<L> LinkRef<L> {
 }
 
 impl<L: AsRef<Link>> LinkRef<L> {
+    #[allow(unused)]
     fn debug(&self) -> impl '_ + std::fmt::Debug {
-        #[expect(unused)]
         #[derive(Debug)]
         struct Link<'a> {
-            id: LinkId,
+            id: usize,
             parent: &'a LinkParent,
-            left_aux: Option<LinkId>,
-            right_aux: Option<LinkId>,
-            rep_parent: Option<LinkId>,
-            ref_count: usize,
-            has_owner: bool,
+            left_aux: Option<usize>,
+            right_aux: Option<usize>,
+            rep_parent: Option<usize>,
         }
-        let has_owner = self.has_owner();
         Link {
             id: self.id,
             parent: &self.parent,
-            left_aux: self.left(),
-            right_aux: self.right(),
-            rep_parent: self.rep_parent(),
-            ref_count: self.ref_count / 2 + has_owner as usize,
-            has_owner,
+            left_aux: self.left_aux.as_ref().map(|l| l.id.id()),
+            right_aux: self.right_aux.as_ref().map(|l| l.id.id()),
+            rep_parent: self.rep_parent.as_ref().map(|l| l.id.id()),
         }
     }
 
-    fn left(&self) -> Option<LinkId> {
-        (self.left_aux != self.id).then_some(self.left_aux)
+    fn left(&self) -> Option<&LinkHandle> {
+        self.left_aux.as_ref()
     }
 
-    fn right(&self) -> Option<LinkId> {
-        (self.right_aux != self.id).then_some(self.right_aux)
-    }
-
-    fn rep_parent(&self) -> Option<LinkId> {
-        (self.rep_parent != self.id).then_some(self.rep_parent)
+    fn right(&self) -> Option<&LinkHandle> {
+        self.right_aux.as_ref()
     }
 }
 
 impl<L: AsMut<Link>> LinkRef<L> {
-    fn set_left(&mut self, left: Option<LinkId>) {
-        self.link.as_mut().left_aux = left.unwrap_or(self.id);
+    fn set_left(&mut self, left: Option<LinkHandle>) {
+        self.link.as_mut().left_aux = left;
     }
 
-    fn set_right(&mut self, right: Option<LinkId>) {
-        self.link.as_mut().right_aux = right.unwrap_or(self.id);
+    fn set_right(&mut self, right: Option<LinkHandle>) {
+        self.link.as_mut().right_aux = right;
     }
 
-    fn set_rep_parent(&mut self, rep_parent: Option<LinkId>) {
-        self.link.as_mut().rep_parent = rep_parent.unwrap_or(self.id);
+    fn rep_parent(&mut self) -> Option<LinkHandle> {
+        self.link
+            .as_mut()
+            .rep_parent
+            .as_ref()
+            .map(|parent| parent.handle())
+    }
+
+    fn replace_rep_parent(&mut self, rep_parent: Option<LinkOwner>) -> Option<LinkOwner> {
+        std::mem::replace(&mut self.link.as_mut().rep_parent, rep_parent)
     }
 }
 
 impl Link {
-    pub fn new(parent: DomSlotVariant, this: LinkId) -> (Self, Option<LinkId>) {
+    pub fn new(parent: DomSlotVariant) -> Self {
         let (parent, link) = match parent {
             DomSlotVariant::Node(node) => (LinkParent::Root(node), None),
-            DomSlotVariant::Chained(handle) => {
-                (LinkParent::PathParent(handle.link.id), Some(handle.link.id))
-            }
+            DomSlotVariant::Chained(handle) => (
+                LinkParent::PathParent(handle.link.clone()),
+                Some(handle.link.to_owner()),
+            ),
         };
-        let this = Self {
+        Self {
             parent,
-            left_aux: this,
-            right_aux: this,
-            rep_parent: link.unwrap_or(this),
-            ref_count: 1,
-        };
-        (this, link)
-    }
-
-    fn has_owner(&self) -> bool {
-        (self.ref_count & 0b1) != 0
-    }
-
-    fn dec_ref(&mut self, owner: bool) -> bool {
-        let weight = if owner { 1 } else { 2 };
-        debug_assert!(self.ref_count >= weight, "must have refs");
-        self.ref_count -= weight;
-        self.ref_count == 0
-    }
-
-    fn add_ref(&mut self) {
-        debug_assert!(self.ref_count > 0, "no revives");
-        self.ref_count += 2;
+            left_aux: None,
+            right_aux: None,
+            rep_parent: link,
+        }
     }
 }
 
@@ -464,14 +481,13 @@ mod feat_hydration {
 
     impl LinkForest {
         pub fn leak(&mut self, link: LinkOwner) -> LinkHandle {
-            self.node_mut(link.id).leak();
+            self.node_mut(&link.handle()).leak();
             LinkHandle::from_raw(link.id)
         }
     }
     impl Link {
         fn leak(&mut self) {
-            self.add_ref();
-            self.dec_ref(true);
+            // self.dec_owner();
         }
     }
 }

@@ -209,7 +209,7 @@ impl DynamicDomSlotHandle {
     }
 
     fn with_next_sibling<R>(&self, f: impl FnOnce(Option<&Node>) -> R) -> R {
-        let node = with_forest(|forest| forest.find_root(&self.link).clone());
+        let node = with_forest(|forest| forest.find_root(&self.link));
         f(node.as_ref())
     }
 }
