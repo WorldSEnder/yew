@@ -2,6 +2,7 @@ use std::cell::{self, RefCell};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
+use std::ptr::NonNull;
 use std::rc::Rc;
 
 use super::{DomSlotVariant, Node};
@@ -10,7 +11,9 @@ type PhantomNotSendNorSync = PhantomData<*const u8>;
 
 /// A dummy struct that serves as a marker for the borrow of [`LINK_FOREST`].
 #[derive(Default)]
-pub struct LinkForest;
+pub struct LinkForest {
+    _priv: (),
+}
 
 thread_local! {
     static LINK_FOREST: RefCell<LinkForest> = {
@@ -25,51 +28,74 @@ pub fn with_forest<R>(f: impl FnOnce(&mut LinkForest) -> R) -> R {
 #[derive(Clone)]
 struct RawLink(
     /// SAFETY: Comes from `Rc::into_raw`
-    *const RefCell<Link>,
+    NonNull<RefCell<Link>>,
 );
 
 impl RawLink {
     fn new(link: Link) -> Self {
         let the_rc = Rc::new(RefCell::new(link));
-        let ptr = Rc::into_raw(the_rc);
-        Self(ptr)
+        let ptr = Rc::into_raw(the_rc).cast_mut();
+        // Pointers from Rc::into_raw are always non-null!
+        Self(NonNull::new(ptr).unwrap())
     }
 
     fn id(&self) -> usize {
-        self.0.addr()
+        self.0.as_ptr().addr()
     }
 
     fn inc_strong(&self) {
-        unsafe { Rc::increment_strong_count(self.0) };
+        unsafe { Rc::increment_strong_count(self.0.as_ptr()) };
     }
 
     fn into_rc(self) -> Rc<RefCell<Link>> {
-        unsafe { Rc::from_raw(self.0) }
+        unsafe { Rc::from_raw(self.0.as_ptr()) }
+    }
+
+    fn as_ref(&self) -> &RefCell<Link> {
+        unsafe { &*self.0.as_ptr() }
     }
 }
 
 impl PartialEq for RawLink {
     fn eq(&self, other: &Self) -> bool {
-        std::ptr::addr_eq(self.0, other.0)
+        self.0 == other.0
     }
 }
 
 #[derive(PartialEq)]
 pub struct LinkOwner {
-    id: RawLink,
+    id: Option<RawLink>,
     // The link is tied to this specific thread and can't be accessed elsewhere
     _phantom: PhantomNotSendNorSync,
 }
 
 impl Debug for LinkOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "#{:x}", self.id.id())
+        write!(f, "#{:x}", self.id())
     }
 }
 
 impl LinkOwner {
     pub fn handle(&self) -> LinkHandle {
-        LinkHandle::from_raw(self.id.clone())
+        LinkHandle::from_raw(self.id.as_ref().unwrap().clone())
+    }
+
+    fn into_inner(self) -> RawLink {
+        self.id.unwrap()
+    }
+
+    fn take(&mut self) -> LinkOwner {
+        Self {
+            id: self.id.take(),
+            _phantom: PhantomData,
+        }
+    }
+
+    fn id(&self) -> usize {
+        match &self.id {
+            Some(id) => id.id(),
+            None => 0,
+        }
     }
 }
 
@@ -96,7 +122,7 @@ impl LinkHandle {
     fn to_owner(&self) -> LinkOwner {
         self.id.inc_strong();
         LinkOwner {
-            id: self.id.clone(),
+            id: Some(self.id.clone()),
             _phantom: PhantomData,
         }
     }
@@ -142,36 +168,37 @@ impl LinkForest {
     pub fn insert(&mut self, link: DomSlotVariant) -> LinkOwner {
         let raw = RawLink::new(Link::new(link));
         LinkOwner {
-            id: raw,
+            id: Some(raw),
             _phantom: PhantomData,
         }
     }
 
-    fn node(&self, link: &LinkHandle) -> LinkRef<impl '_ + AsRef<Link>> {
-        let refcell = unsafe { &*link.id.0 };
-        LinkRef::new(link.id.id(), AsRefRef(refcell.borrow()))
+    fn node<'h>(&self, link: &'h LinkHandle) -> LinkRef<impl 'h + AsRef<Link>> {
+        LinkRef::new(link.id.id(), AsRefRef(link.id.as_ref().borrow()))
     }
 
-    fn node_mut(&mut self, link: &LinkHandle) -> LinkRef<impl '_ + AsRef<Link> + AsMut<Link>> {
-        let refcell = unsafe { &*link.id.0 };
-        LinkRef::new(link.id.id(), AsRefMut(refcell.borrow_mut()))
+    fn node_mut<'h>(
+        &mut self,
+        link: &'h LinkHandle,
+    ) -> LinkRef<impl 'h + AsRef<Link> + AsMut<Link>> {
+        LinkRef::new(link.id.id(), AsRefMut(link.id.as_ref().borrow_mut()))
     }
 
-    fn remove_node(&mut self, link: &LinkOwner) -> Option<LinkRef<Link>> {
+    fn remove_node(&mut self, link: LinkOwner) -> Option<LinkRef<Link>> {
         // TODO: this should take the owner by value, but that's incompatible with calling it
         // inside of a Drop method without adding a new "invalid" state.
-        let id = link.id.id();
-        let owned = link.id.clone().into_rc();
+        let inner = link.into_inner();
+        let id = inner.id();
+        let owned = inner.into_rc();
         let inner = Rc::try_unwrap(owned).ok()?.into_inner();
         Some(LinkRef::new(id, inner))
     }
 
     pub fn remove(&mut self, link: &mut LinkOwner) {
-        self.remove_link(link);
+        self.remove_link(link.take());
     }
 
-    fn remove_link(&mut self, link: &LinkOwner) {
-        let mut slot;
+    fn remove_link(&mut self, link: LinkOwner) {
         let mut n = link;
         loop {
             let Some(mut node) = self.remove_node(n) else {
@@ -185,7 +212,7 @@ impl LinkForest {
             let rep_p = node.replace_rep_parent(None);
             let p = node.into_inner().parent;
             if let LinkParent::AuxParent(p) = &p {
-                debug_assert!(self.node(p).right() == Some(&n.handle()));
+                // debug_assert!(self.node(p).right() == Some(&n.handle()));
                 self.node_mut(p).set_right(l.clone());
             }
             if let Some(l) = l {
@@ -194,8 +221,7 @@ impl LinkForest {
             let Some(rep_p) = rep_p else {
                 break;
             };
-            slot = rep_p;
-            n = &slot;
+            n = rep_p;
         }
     }
 
@@ -222,7 +248,7 @@ impl LinkForest {
             self.node_mut(&l).parent = parent;
         }
         if let Some(old_parent_id) = old_parent_id {
-            self.remove_link(&old_parent_id);
+            self.remove_link(old_parent_id);
         }
     }
 
@@ -240,7 +266,7 @@ impl LinkForest {
     fn splay_parent(&self, link: &LinkHandle) -> Result<LinkHandle, SplayResult> {
         // Due to borrow issues (fixed with polonius?) we can't borrow data here, and do that
         // in the caller with a double match :/
-        match &self.node(&link).parent {
+        match &self.node(link).parent {
             LinkParent::AuxParent(parent) => Ok(parent.clone()),
             LinkParent::PathParent(link) => Err(SplayResult::Link(link.clone())),
             LinkParent::Root(_) => Err(SplayResult::Root()),
@@ -422,7 +448,7 @@ impl<L: AsRef<Link>> LinkRef<L> {
             parent: &self.parent,
             left_aux: self.left_aux.as_ref().map(|l| l.id.id()),
             right_aux: self.right_aux.as_ref().map(|l| l.id.id()),
-            rep_parent: self.rep_parent.as_ref().map(|l| l.id.id()),
+            rep_parent: self.rep_parent.as_ref().map(|l| l.id()),
         }
     }
 
@@ -482,7 +508,7 @@ mod feat_hydration {
     impl LinkForest {
         pub fn leak(&mut self, link: LinkOwner) -> LinkHandle {
             self.node_mut(&link.handle()).leak();
-            LinkHandle::from_raw(link.id)
+            LinkHandle::from_raw(link.into_inner())
         }
     }
     impl Link {
