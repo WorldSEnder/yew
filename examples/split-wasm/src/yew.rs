@@ -55,13 +55,11 @@ fn App() -> Html {
     let toggle = use_state(|| false);
     let show = *toggle;
     html! {
-        <>
         <input id="additional" type="checkbox" checked={*toggle} oninput={move |ev: InputEvent| toggle.set(ev.target_unchecked_into::<HtmlInputElement>().checked())} />
         <label for="additional">{"Display additional content"}</label>
         <Suspense fallback={html! { <p>{"not yet loaded"}</p> }}>
             if show { <LazyAddition label="A lazily loaded counter" /> } else { <Pending /> }
         </Suspense>
-        </>
     }
 }
 
